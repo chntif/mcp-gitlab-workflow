@@ -1,0 +1,46 @@
+{
+  "name": "mcp-gitlab-workflow",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "description": "GitLab workflow MCP server for issue/branch/commit/MR/review automation",
+  "main": "dist/src/server.js",
+  "bin": {
+    "mcp-gitlab-workflow": "dist/src/server.js"
+  },
+  "author": "chenba <chenba@baimaohui.net>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chenba/mcp-gitlab-workflow.git"
+  },
+  "bugs": {
+    "url": "https://github.com/chenba/mcp-gitlab-workflow/issues"
+  },
+  "homepage": "https://github.com/chenba/mcp-gitlab-workflow#readme",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "gitlab",
+    "workflow",
+    "automation"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/server.ts",
+    "start": "node dist/src/server.js",
+    "test": "node --test --import tsx tests/workflow.test.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.11.4",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^24.11.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}
