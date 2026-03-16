@@ -6,44 +6,56 @@ export interface BranchNameInput {
   requirementText: string;
 }
 
-export interface IssueDescriptionInput {
+export interface DefaultIssueTemplateInput {
   sourceText: string;
   expectedBehavior: string;
   currentBehavior?: string;
   given: string;
   when: string;
   then: string;
-  repoPath: string;
+  repoPath?: string;
 }
 
 export interface IssueLogEntryInput {
   date: string;
   issueTitle: string;
   issueIid: number;
-  issueProjectPath: string;
+  issueProjectPath?: string;
   issueProjectId: number;
   issueWebUrl: string;
   branchName: string;
-  codeProjectPath: string;
+  codeProjectPath?: string;
   codeProjectId: number;
   summary: string;
   status: string;
 }
 
-const FIX_KEYWORDS = ["bug", "fix", "错误", "修复", "异常", "故障", "崩溃"];
-const CHORE_KEYWORDS = ["优化", "optimize", "优化", "重构", "refactor", "性能"];
+const FIX_KEYWORDS = [
+  "bug",
+  "fix",
+  "error",
+  "fault",
+  "\u4fee\u590d",
+  "\u9519\u8bef",
+  "\u5f02\u5e38",
+];
+const CHORE_KEYWORDS = [
+  "optimize",
+  "optimization",
+  "refactor",
+  "performance",
+  "\u4f18\u5316",
+  "\u91cd\u6784",
+];
 
 export function detectWorkType(requirementText: string): WorkType {
   const normalized = requirementText.toLowerCase();
-
   if (FIX_KEYWORDS.some((keyword) => normalized.includes(keyword))) {
     return "fix";
   }
-
   if (CHORE_KEYWORDS.some((keyword) => normalized.includes(keyword))) {
     return "chore";
   }
-
   return "feat";
 }
 
@@ -61,7 +73,6 @@ function extractAsciiSlug(requirementText: string): string {
   if (!words || words.length === 0) {
     return "";
   }
-
   return words.map((word) => word.toLowerCase()).join("-");
 }
 
@@ -88,54 +99,71 @@ export function summarizeRequirement(requirementText: string, maxLength = 30): s
   if (compact.length <= maxLength) {
     return compact;
   }
-  return `${compact.slice(0, maxLength - 1)}…`;
+  return `${compact.slice(0, maxLength - 1)}...`;
 }
 
-export function buildIssueTitle(featureSummary: string): string {
-  return `[前端] ${featureSummary}`;
+export function buildIssueTitle(summary: string, label?: string): string {
+  if (label?.trim()) {
+    return `[${label.trim()}] ${summary}`;
+  }
+  return summary;
 }
 
-export function buildIssueDescription(input: IssueDescriptionInput): string {
+export function buildDefaultIssueDescription(input: DefaultIssueTemplateInput): string {
   const currentBehaviorLine = input.currentBehavior
-    ? `* **当前行为** (对于 Bug 或优化): ${input.currentBehavior}\n`
+    ? `* **Current behavior**: ${input.currentBehavior}\n`
     : "";
+  const repoLine = input.repoPath ? input.repoPath : "N/A";
 
-  return `### 1. 背景与业务目标 (Why?)
-* **问题/需求来源**: ${input.sourceText}
+  return `### 1. Background and Goal (Why?)
+* **Source**: ${input.sourceText}
 
-### 2. 功能/修复描述 (What?)
-${currentBehaviorLine}* **期望行为**: ${input.expectedBehavior}
+### 2. What should change (What?)
+${currentBehaviorLine}* **Expected behavior**: ${input.expectedBehavior}
 
-### 3. 验收标准 (Acceptance Criteria - AC)
-*使用 GIVEN-WHEN-THEN 格式*
+### 3. Acceptance Criteria
 - GIVEN ${input.given}
 - WHEN ${input.when}
 - THEN ${input.then}
 
-### 4. 涉及范围与关联项
-* **涉及代码库**: ${input.repoPath}
-* **设计稿/原型链接**: 暂无
-* **API 文档链接**: 暂无
-* **其他相关文档**: 暂无`;
+### 4. Scope
+* **Repository**: ${repoLine}`;
+}
+
+export function renderTemplate(template: string, variables: Record<string, string>): string {
+  return template.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_match, rawKey: string) => {
+    const key = String(rawKey);
+    if (key in variables) {
+      return variables[key];
+    }
+    return `{{${key}}}`;
+  });
 }
 
 export function renderIssueLogEntry(input: IssueLogEntryInput): string {
+  const issueProjectLine = input.issueProjectPath
+    ? `${input.issueProjectPath} (project_id: ${input.issueProjectId})`
+    : `project_id: ${input.issueProjectId}`;
+  const codeProjectLine = input.codeProjectPath
+    ? `${input.codeProjectPath} (project_id: ${input.codeProjectId})`
+    : `project_id: ${input.codeProjectId}`;
+
   return `## [${input.date}] ${input.issueTitle}
 
-| 字段 | 值 |
+| Field | Value |
 |------|-----|
 | Issue ID (iid) | \`${input.issueIid}\` |
-| Issue 项目 | ${input.issueProjectPath} (project_id: ${input.issueProjectId}) |
+| Issue Project | ${issueProjectLine} |
 | Issue URL | \`${input.issueWebUrl}\` |
-| 代码分支 | \`${input.branchName}\` |
-| 代码项目 | ${input.codeProjectPath} (project_id: ${input.codeProjectId}) |
-| 状态 | ${input.status} |
+| Code Branch | \`${input.branchName}\` |
+| Code Project | ${codeProjectLine} |
+| Status | ${input.status} |
 
-**问题描述**：${input.summary}
+**Summary**: ${input.summary}
 
-**AI 定位参数**：
-- 查询 Issue：\`gitlab.get_issue(project_id=${input.issueProjectId}, issue_iid=${input.issueIid})\`
-- 查询评论：\`gitlab.get_workitem_notes(project_id=${input.issueProjectId}, workitem_id=${input.issueIid})\`
+**Lookup tips**:
+- Query issue: \`gitlab_get_issue(project_id=${input.issueProjectId}, issue_iid=${input.issueIid})\`
+- Query issue notes: \`gitlab_get_issue_notes(project_id=${input.issueProjectId}, issue_iid=${input.issueIid})\`
 
 ---
 `;
@@ -144,43 +172,49 @@ export function renderIssueLogEntry(input: IssueLogEntryInput): string {
 export function renderIssueCompletionComment(input: {
   changedFiles: string[];
   branchName: string;
-  codeProjectPath: string;
+  codeProjectPath?: string;
   implementationSummary: string;
   acceptanceSteps: string;
 }): string {
   const changedFileText =
     input.changedFiles.length > 0
       ? input.changedFiles.map((file) => `- ${file}`).join("\n")
-      : "- 无文件变更信息";
+      : "- No file list provided";
+  const projectLine = input.codeProjectPath ?? "N/A";
 
-  return `## ✅ 代码修改完成
+  return `## Code changes completed
 
-### 修改内容
+### Files changed
 ${changedFileText}
 
-### 分支信息
-- **代码分支**：\`${input.branchName}\`
-- **代码项目**：${input.codeProjectPath}
+### Branch info
+- Branch: \`${input.branchName}\`
+- Project: ${projectLine}
 
-### 改动说明
+### Implementation notes
 ${input.implementationSummary}
 
-### 验收方式
+### Validation
 ${input.acceptanceSteps}`;
 }
 
 export function renderMergeRequestDescription(input: {
-  issueProjectPath: string;
+  issueProjectPath?: string;
+  issueProjectId: number;
   issueIid: number;
   changeSummary: string;
   testPlan: string;
 }): string {
-  return `## 关联 Issue
-${input.issueProjectPath}#${input.issueIid}
+  const issueRef = input.issueProjectPath
+    ? `${input.issueProjectPath}#${input.issueIid}`
+    : `project_id=${input.issueProjectId}, issue_iid=${input.issueIid}`;
 
-## 改动说明
+  return `## Related issue
+${issueRef}
+
+## Change summary
 ${input.changeSummary}
 
-## 测试说明
+## Test plan
 ${input.testPlan}`;
 }

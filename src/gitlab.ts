@@ -18,9 +18,13 @@ export interface CommitActionInput {
 export interface CreateIssueInput {
   projectId: number;
   title: string;
-  description: string;
+  description?: string;
   labels?: string[];
-  assigneeId?: number;
+  assigneeIds?: number[];
+  milestoneId?: number;
+  dueDate?: string;
+  confidential?: boolean;
+  issueType?: string;
 }
 
 export interface CreateMergeRequestInput {
@@ -28,10 +32,13 @@ export interface CreateMergeRequestInput {
   sourceBranch: string;
   targetBranch: string;
   title: string;
-  description: string;
+  description?: string;
   labels?: string[];
-  assigneeId?: number;
+  assigneeIds?: number[];
+  reviewerIds?: number[];
   removeSourceBranch?: boolean;
+  squash?: boolean;
+  draft?: boolean;
 }
 
 export interface CreateCommitInput {
@@ -71,15 +78,34 @@ export class GitLabClient {
   async createIssue(input: CreateIssueInput): Promise<any> {
     const body: Record<string, unknown> = {
       title: input.title,
-      description: input.description,
     };
+
+    if (input.description !== undefined) {
+      body.description = input.description;
+    }
 
     if (input.labels && input.labels.length > 0) {
       body.labels = input.labels.join(",");
     }
 
-    if (input.assigneeId) {
-      body.assignee_ids = [input.assigneeId];
+    if (input.assigneeIds && input.assigneeIds.length > 0) {
+      body.assignee_ids = input.assigneeIds;
+    }
+
+    if (input.milestoneId !== undefined) {
+      body.milestone_id = input.milestoneId;
+    }
+
+    if (input.dueDate !== undefined) {
+      body.due_date = input.dueDate;
+    }
+
+    if (input.confidential !== undefined) {
+      body.confidential = input.confidential;
+    }
+
+    if (input.issueType !== undefined) {
+      body.issue_type = input.issueType;
     }
 
     return this.request(`/projects/${encodeURIComponent(String(input.projectId))}/issues`, {
@@ -97,11 +123,27 @@ export class GitLabClient {
     );
   }
 
-  async getIssueNotes(projectId: number, issueIid: number): Promise<any> {
+  async getIssueNotes(
+    projectId: number,
+    issueIid: number,
+    options?: {
+      sort?: "asc" | "desc";
+      orderBy?: "created_at" | "updated_at";
+    },
+  ): Promise<any> {
+    const query: Record<string, string> = {};
+    if (options?.sort) {
+      query.sort = options.sort;
+    }
+    if (options?.orderBy) {
+      query.order_by = options.orderBy;
+    }
+
     return this.request(
       `/projects/${encodeURIComponent(String(projectId))}/issues/${encodeURIComponent(String(issueIid))}/notes`,
       {
         method: "GET",
+        query,
       },
     );
   }
@@ -172,16 +214,34 @@ export class GitLabClient {
       source_branch: input.sourceBranch,
       target_branch: input.targetBranch,
       title: input.title,
-      description: input.description,
-      remove_source_branch: Boolean(input.removeSourceBranch),
     };
+
+    if (input.description !== undefined) {
+      body.description = input.description;
+    }
 
     if (input.labels && input.labels.length > 0) {
       body.labels = input.labels.join(",");
     }
 
-    if (input.assigneeId) {
-      body.assignee_ids = [input.assigneeId];
+    if (input.assigneeIds && input.assigneeIds.length > 0) {
+      body.assignee_ids = input.assigneeIds;
+    }
+
+    if (input.reviewerIds && input.reviewerIds.length > 0) {
+      body.reviewer_ids = input.reviewerIds;
+    }
+
+    if (input.squash !== undefined) {
+      body.squash = input.squash;
+    }
+
+    if (input.removeSourceBranch !== undefined) {
+      body.remove_source_branch = input.removeSourceBranch;
+    }
+
+    if (input.draft !== undefined) {
+      body.draft = input.draft;
     }
 
     return this.request(`/projects/${encodeURIComponent(String(input.projectId))}/merge_requests`, {
