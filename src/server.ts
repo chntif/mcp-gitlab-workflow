@@ -49,7 +49,6 @@ import {
   workflowCreateMergeRequestOutputSchema,
   workflowIssueToMrFullOutputSchema,
   workflowLocalSyncCheckoutBranchOutputSchema,
-  workflowParseRequirementOutputSchema,
   workflowRequirementToDeliveryFullOutputSchema,
   workflowReviewMrAndCommentOutputSchema,
 } from "./output-schemas.js";
@@ -1283,51 +1282,6 @@ const commitActionSchema = z.object({
 });
 
 // TOOL REGISTRATION START
-
-server.registerTool(
-  "workflow_parse_requirement",
-  {
-    description:
-      "Parse requirement text into work_type, issue_title, commit_type, and branch_name.",
-    outputSchema: workflowParseRequirementOutputSchema,
-    inputSchema: {
-      requirement_text: z.string().min(1).describe("Raw user requirement text."),
-      english_slug: z
-        .string()
-        .optional()
-        .describe("Optional English slug used for branch name, e.g. 'asset-export'."),
-      work_type: z
-        .enum(["feat", "fix", "chore"])
-        .optional()
-        .describe("Optional override for work type."),
-      summary: z
-        .string()
-        .optional()
-        .describe("Optional short summary used in issue title."),
-      label: z
-        .string()
-        .optional()
-        .describe("Optional label prefix for title, e.g. 'frontend'."),
-    },
-  },
-  withToolErrorHandling("workflow_parse_requirement", async (args) => {
-    const parsed = parseRequirementMetadata({
-      requirementText: args.requirement_text,
-      englishSlug: args.english_slug,
-      workType: args.work_type,
-      summary: args.summary,
-      label: args.label,
-    });
-
-    return {
-      work_type: parsed.workType,
-      commit_type: parsed.workType,
-      summary: parsed.summary,
-      issue_title: parsed.issueTitle,
-      branch_name: parsed.branchName,
-    };
-  }),
-);
 
 server.registerTool(
   "workflow_analyze_and_create_issue",

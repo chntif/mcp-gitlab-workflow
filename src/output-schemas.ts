@@ -293,10 +293,6 @@ const gitlabIssueImagesSchema = z.object({
   images: z.array(issueImageItemSchema).describe("Parsed image references."),
 });
 
-export const workflowParseRequirementOutputSchema = createToolOutputSchema(
-  workflowParseRequirementDataSchema,
-  "Parsed requirement result.",
-);
 export const workflowAppendIssueLogOutputSchema = createToolOutputSchema(
   workflowAppendIssueLogDataSchema,
   "Issue log append result.",

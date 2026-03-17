@@ -11,7 +11,6 @@
 
 ## 2. Workflow 工具
 
-- `workflow_parse_requirement`：解析需求文本，输出 `work_type/summary/issue_title/branch_name`
 - `workflow_analyze_and_create_issue`：分析需求并创建 Issue（支持标签自动建议/自动创建、默认指派给当前用户）
 - `workflow_review_mr_and_comment`：读取 MR 变更并发布审查评论，可选自动审批
 - `workflow_local_sync_checkout_branch`：本地仓库 `fetch/pull/checkout` 切换到目标分支
