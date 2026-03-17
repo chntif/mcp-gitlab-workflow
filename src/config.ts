@@ -8,6 +8,8 @@ export interface WorkflowEnvDefaults {
   label?: string;
   assigneeUsername?: string;
   issueLogPath?: string;
+  localRepoPath?: string;
+  localGitRemoteName?: string;
 }
 
 export interface WorkflowLocks {
@@ -46,6 +48,8 @@ export function getRuntimeConfig(): RuntimeConfig {
       label: optionalString(process.env.WORKFLOW_LABEL),
       assigneeUsername: optionalString(process.env.WORKFLOW_ASSIGNEE_USERNAME),
       issueLogPath: optionalString(process.env.WORKFLOW_ISSUE_LOG_PATH),
+      localRepoPath: optionalString(process.env.WORKFLOW_LOCAL_REPO_PATH),
+      localGitRemoteName: optionalString(process.env.WORKFLOW_LOCAL_REMOTE_NAME),
     },
     locks: {
       issueProjectId: parseOptionalInt(

@@ -103,6 +103,53 @@ const workflowReviewMrAndCommentDataSchema = z.object({
     .describe("Approval execution result when requested."),
 });
 
+const workflowLocalSyncCheckoutBranchDataSchema = z.object({
+  repo_path: z.string().describe("Absolute local repository path."),
+  remote_name: z.string().describe("Git remote name used for synchronization."),
+  branch_name: z.string().describe("Checked-out branch name."),
+  commands: z.array(z.string()).describe("Executed git commands."),
+  current_branch: z.string().describe("Current local branch after execution."),
+  head_sha: z.string().describe("HEAD commit SHA after checkout."),
+});
+
+const workflowIssueToMrFullDataSchema = z.object({
+  issue: issueBriefSchema.describe("Related issue metadata."),
+  branch: branchBriefSchema.describe("Created/used branch metadata."),
+  commit: z
+    .object({
+      id: z.unknown().optional().describe("Commit SHA."),
+      short_id: z.unknown().optional().describe("Short commit SHA."),
+      title: z.unknown().optional().describe("Commit title."),
+      web_url: z.unknown().optional().describe("Commit URL."),
+    })
+    .describe("Commit result payload."),
+  merge_request: mergeRequestBriefSchema.describe("Created merge request metadata."),
+  review_note: z
+    .object({
+      note_id: z.number().describe("Created MR review note ID."),
+      body: z.string().describe("Review note markdown body."),
+      web_url: z.string().nullable().describe("MR note URL when available."),
+    })
+    .describe("MR review comment result."),
+  issue_comment: z
+    .object({
+      note_id: z.number().describe("Created issue note ID."),
+      body: z.string().describe("Issue note markdown body."),
+      web_url: z.string().nullable().describe("Issue note URL when available."),
+    })
+    .describe("Issue comment result."),
+  local_checkout: workflowLocalSyncCheckoutBranchDataSchema
+    .optional()
+    .describe("Optional local checkout result."),
+  log: logUpdateSchema.describe("Issue log update result."),
+});
+
+const workflowRequirementToDeliveryFullDataSchema = z.object({
+  created_issue: issueBriefSchema.describe("Issue created from requirement."),
+  parsed: workflowParseRequirementDataSchema.describe("Requirement parsing result."),
+  delivery: workflowIssueToMrFullDataSchema.describe("Delivery workflow result."),
+});
+
 const gitlabIssueSchema = z
   .object({
     id: z.number().describe("Issue global ID."),
@@ -294,6 +341,18 @@ export const workflowAnalyzeAndCreateIssueOutputSchema = createToolOutputSchema(
 export const workflowReviewMrAndCommentOutputSchema = createToolOutputSchema(
   workflowReviewMrAndCommentDataSchema,
   "Review merge request and create comment workflow result.",
+);
+export const workflowLocalSyncCheckoutBranchOutputSchema = createToolOutputSchema(
+  workflowLocalSyncCheckoutBranchDataSchema,
+  "Local repository sync and branch checkout result.",
+);
+export const workflowIssueToMrFullOutputSchema = createToolOutputSchema(
+  workflowIssueToMrFullDataSchema,
+  "Issue to MR full-chain workflow result.",
+);
+export const workflowRequirementToDeliveryFullOutputSchema = createToolOutputSchema(
+  workflowRequirementToDeliveryFullDataSchema,
+  "Requirement to delivery full workflow result.",
 );
 
 export const gitlabCreateIssueOutputSchema = createToolOutputSchema(

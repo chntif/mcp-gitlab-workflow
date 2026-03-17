@@ -2,6 +2,7 @@
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { spawn } from "node:child_process";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -47,7 +48,10 @@ import {
   workflowAppendIssueLogOutputSchema,
   workflowCompleteOutputSchema,
   workflowCreateMergeRequestOutputSchema,
+  workflowIssueToMrFullOutputSchema,
+  workflowLocalSyncCheckoutBranchOutputSchema,
   workflowParseRequirementOutputSchema,
+  workflowRequirementToDeliveryFullOutputSchema,
   workflowReviewMrAndCommentOutputSchema,
   workflowStartOutputSchema,
 } from "./output-schemas.js";
@@ -687,6 +691,134 @@ async function ensureLabelsExist(
   return normalized;
 }
 
+async function runGitInRepo(toolName: string, repoPath: string, gitArgs: string[]): Promise<string> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn("git", ["-C", repoPath, ...gitArgs], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.on("error", (error) => {
+      rejectPromise(
+        new ToolInputError(
+          `[${toolName}] Failed to execute git command: git -C ${repoPath} ${gitArgs.join(" ")} (${error.message})`,
+        ),
+      );
+    });
+
+    child.on("close", (code) => {
+      if (code !== 0) {
+        rejectPromise(
+          new ToolInputError(
+            `[${toolName}] Git command failed (exit=${code}): git -C ${repoPath} ${gitArgs.join(
+              " ",
+            )}\n${stderr || stdout}`,
+          ),
+        );
+        return;
+      }
+      resolvePromise(stdout.trim());
+    });
+  });
+}
+
+async function syncAndCheckoutLocalBranch(params: {
+  toolName: string;
+  repoPath: string;
+  remoteName: string;
+  branchName: string;
+  baseBranch?: string;
+}): Promise<{
+  repo_path: string;
+  remote_name: string;
+  branch_name: string;
+  commands: string[];
+  current_branch: string;
+  head_sha: string;
+}> {
+  const commands: string[] = [];
+  const pushCommand = (args: string[]) => {
+    commands.push(`git -C ${params.repoPath} ${args.join(" ")}`);
+  };
+
+  const fetchArgs = ["fetch", params.remoteName];
+  pushCommand(fetchArgs);
+  await runGitInRepo(params.toolName, params.repoPath, fetchArgs);
+
+  if (params.baseBranch?.trim()) {
+    const checkoutBaseArgs = ["checkout", params.baseBranch];
+    pushCommand(checkoutBaseArgs);
+    await runGitInRepo(params.toolName, params.repoPath, checkoutBaseArgs);
+
+    const pullBaseArgs = ["pull", params.remoteName, params.baseBranch];
+    pushCommand(pullBaseArgs);
+    await runGitInRepo(params.toolName, params.repoPath, pullBaseArgs);
+  }
+
+  const localBranch = await runGitInRepo(params.toolName, params.repoPath, [
+    "branch",
+    "--list",
+    params.branchName,
+  ]);
+  const remoteBranch = await runGitInRepo(params.toolName, params.repoPath, [
+    "branch",
+    "-r",
+    "--list",
+    `${params.remoteName}/${params.branchName}`,
+  ]);
+
+  if (localBranch.trim()) {
+    const checkoutLocalArgs = ["checkout", params.branchName];
+    pushCommand(checkoutLocalArgs);
+    await runGitInRepo(params.toolName, params.repoPath, checkoutLocalArgs);
+
+    if (remoteBranch.trim()) {
+      const pullLocalArgs = ["pull", params.remoteName, params.branchName];
+      pushCommand(pullLocalArgs);
+      await runGitInRepo(params.toolName, params.repoPath, pullLocalArgs);
+    }
+  } else if (remoteBranch.trim()) {
+    const checkoutTrackArgs = [
+      "checkout",
+      "-b",
+      params.branchName,
+      "--track",
+      `${params.remoteName}/${params.branchName}`,
+    ];
+    pushCommand(checkoutTrackArgs);
+    await runGitInRepo(params.toolName, params.repoPath, checkoutTrackArgs);
+  } else {
+    const checkoutNewArgs = ["checkout", "-b", params.branchName];
+    pushCommand(checkoutNewArgs);
+    await runGitInRepo(params.toolName, params.repoPath, checkoutNewArgs);
+  }
+
+  const currentBranch = await runGitInRepo(params.toolName, params.repoPath, [
+    "rev-parse",
+    "--abbrev-ref",
+    "HEAD",
+  ]);
+  const headSha = await runGitInRepo(params.toolName, params.repoPath, ["rev-parse", "HEAD"]);
+
+  return {
+    repo_path: params.repoPath,
+    remote_name: params.remoteName,
+    branch_name: params.branchName,
+    commands,
+    current_branch: currentBranch,
+    head_sha: headSha,
+  };
+}
+
 function validateCommitActions(toolName: string, actions: CommitActionInput[]) {
   if (actions.length === 0) {
     missingParam(toolName, "actions");
@@ -757,6 +889,369 @@ async function createWorkflowMergeRequest(params: {
     squash: params.squash,
     draft: params.draft,
   });
+}
+
+function buildDefaultReviewComment(params: {
+  summary?: string;
+  changedFiles?: string[];
+  existingNotesCount?: number;
+}): string {
+  const summary = params.summary?.trim() || "已完成自动审查，请查看变更并确认。";
+  const changedFilesSection =
+    params.changedFiles && params.changedFiles.length > 0
+      ? params.changedFiles.slice(0, 20).map((path) => `- ${path}`).join("\n")
+      : "- No changed files loaded";
+  const noteLine =
+    params.existingNotesCount !== undefined
+      ? `\n- Existing notes: ${params.existingNotesCount}`
+      : "";
+  return `## Automated MR Review\n\n### Summary\n${summary}\n\n### Changed Files\n${changedFilesSection}${noteLine}`;
+}
+
+async function executeAnalyzeAndCreateIssueWorkflow(params: {
+  toolName: string;
+  requirementText: string;
+  sourceText?: string;
+  expectedBehavior?: string;
+  currentBehavior?: string;
+  given?: string;
+  when?: string;
+  then?: string;
+  issueTemplate?: string;
+  templateVariables?: Record<string, string>;
+  englishSlug?: string;
+  workType?: WorkType;
+  summary?: string;
+  issueProjectId: number;
+  issueProjectPath?: string;
+  codeProjectId?: number;
+  codeProjectPath?: string;
+  labels?: string[];
+  label?: string;
+  autoCreateLabels?: boolean;
+  assigneeUsername?: string;
+  assigneeUsernames?: string[];
+  assignToCurrentUserIfMissing?: boolean;
+}) {
+  const initialLabels = (() => {
+    const explicit = normalizeUniqueStringArray(params.labels);
+    if (explicit && explicit.length > 0) {
+      return explicit;
+    }
+    if (params.label?.trim()) {
+      return [params.label.trim()];
+    }
+    const parsedType = params.workType ?? detectWorkType(params.requirementText);
+    return detectSuggestedLabels(params.requirementText, parsedType);
+  })();
+
+  const titleLabel = params.label?.trim() || initialLabels[0];
+  const parsed = parseRequirementMetadata({
+    requirementText: params.requirementText,
+    englishSlug: params.englishSlug,
+    workType: params.workType,
+    summary: params.summary,
+    label: titleLabel,
+  });
+
+  const ensuredLabels = await ensureLabelsExist(
+    params.toolName,
+    params.issueProjectId,
+    initialLabels,
+    params.autoCreateLabels ?? true,
+  );
+
+  const issueDescription = buildIssueDescriptionFromInput({
+    toolName: params.toolName,
+    issueTemplate: params.issueTemplate,
+    templateVariables: params.templateVariables,
+    requirementText: params.requirementText,
+    summary: parsed.summary,
+    sourceText: params.sourceText,
+    expectedBehavior: params.expectedBehavior,
+    currentBehavior: params.currentBehavior,
+    given: params.given,
+    when: params.when,
+    then: params.then,
+    issueProjectId: params.issueProjectId,
+    issueProjectPath: params.issueProjectPath,
+    codeProjectId: params.codeProjectId,
+    codeProjectPath: params.codeProjectPath,
+    branchName: parsed.branchName,
+    workType: parsed.workType,
+    label: titleLabel,
+  });
+
+  const assigneeIds = await resolveIssueAssigneeIds(params.toolName, {
+    assigneeUsernames: params.assigneeUsernames,
+    assigneeUsername: params.assigneeUsername,
+    assignToCurrentUserIfMissing: params.assignToCurrentUserIfMissing ?? true,
+  });
+
+  const issue = await gitlab.createIssue({
+    projectId: params.issueProjectId,
+    title: parsed.issueTitle,
+    description: issueDescription,
+    labels: ensuredLabels,
+    assigneeIds,
+  });
+
+  return {
+    parsed: {
+      work_type: parsed.workType,
+      commit_type: parsed.workType,
+      summary: parsed.summary,
+      issue_title: parsed.issueTitle,
+      branch_name: parsed.branchName,
+    },
+    issue: {
+      id: issue.id,
+      iid: issue.iid,
+      web_url: issue.web_url,
+    },
+    labels: ensuredLabels,
+  };
+}
+
+async function executeIssueToMrFullWorkflow(params: {
+  toolName: string;
+  issueProjectId: number;
+  issueProjectPath?: string;
+  issueIid: number;
+  codeProjectId: number;
+  codeProjectPath?: string;
+  baseBranch: string;
+  targetBranch: string;
+  branchName?: string;
+  englishSlug?: string;
+  workType?: WorkType;
+  summary?: string;
+  commitMessage?: string;
+  commitActions: CommitActionInput[];
+  changeSummary: string;
+  testPlan: string;
+  label?: string;
+  assigneeUsername?: string;
+  reviewCommentBody?: string;
+  reviewSummary?: string;
+  includeChangesInReview?: boolean;
+  includeExistingNotesInReview?: boolean;
+  approveMr?: boolean;
+  approveSha?: string;
+  checkoutLocalBranch?: boolean;
+  localRepoPath?: string;
+  localRemoteName?: string;
+  issueCommentBody?: string;
+  implementationSummary?: string;
+  acceptanceSteps?: string;
+  updateLog?: boolean;
+  logPath?: string;
+  logStatus?: string;
+}) {
+  const issue = await gitlab.getIssue(params.issueProjectId, params.issueIid);
+
+  const issueTitle = typeof issue.title === "string" ? issue.title : `Issue ${params.issueIid}`;
+  const requirementText = [issueTitle, typeof issue.description === "string" ? issue.description : ""]
+    .filter((part) => part.trim().length > 0)
+    .join("\n");
+
+  const workType = params.workType ?? detectWorkType(requirementText || issueTitle);
+  const summaryCandidate = params.summary?.trim() || getLabelStrippedSummary(issueTitle).trim();
+  const summary = summaryCandidate || summarizeRequirement(requirementText || issueTitle, 30);
+  const computedBranchName =
+    params.branchName ??
+    buildBranchName({
+      workType,
+      englishSlug: params.englishSlug,
+      requirementText: requirementText || issueTitle,
+    });
+
+  const branch = await gitlab.createBranch(params.codeProjectId, computedBranchName, params.baseBranch);
+
+  validateCommitActions(params.toolName, params.commitActions);
+  const commitMessage =
+    params.commitMessage?.trim() ||
+    `${workType}: ${summary}\n\nRelated Issue: ${params.issueProjectId}#${params.issueIid}`;
+  const commit = await gitlab.createCommit({
+    projectId: params.codeProjectId,
+    branch: computedBranchName,
+    commitMessage,
+    actions: params.commitActions,
+  });
+
+  const mr = await createWorkflowMergeRequest({
+    issueProjectId: params.issueProjectId,
+    issueProjectPath: params.issueProjectPath,
+    issueIid: params.issueIid,
+    codeProjectId: params.codeProjectId,
+    sourceBranch: computedBranchName,
+    targetBranch: params.targetBranch,
+    workType,
+    summary,
+    changeSummary: params.changeSummary,
+    testPlan: params.testPlan,
+    label: params.label,
+    assigneeUsername: params.assigneeUsername,
+  });
+
+  const includeChangesInReview = params.includeChangesInReview ?? true;
+  const includeExistingNotesInReview = params.includeExistingNotesInReview ?? false;
+
+  let changedFiles: string[] = params.commitActions
+    .map((action) => action.file_path?.trim())
+    .filter((path): path is string => Boolean(path));
+
+  if (includeChangesInReview) {
+    const changes = await gitlab.getMergeRequestChanges(params.codeProjectId, mr.iid);
+    const changedByMr = ((changes?.changes ?? []) as any[])
+      .map((item) => (typeof item?.new_path === "string" ? item.new_path : item?.old_path))
+      .filter((path): path is string => typeof path === "string");
+    if (changedByMr.length > 0) {
+      changedFiles = changedByMr;
+    }
+  }
+  changedFiles = [...new Set(changedFiles)];
+
+  let existingNotesCount: number | undefined;
+  if (includeExistingNotesInReview) {
+    const notes = await gitlab.getMergeRequestNotes(params.codeProjectId, mr.iid, {
+      sort: "asc",
+      orderBy: "created_at",
+    });
+    existingNotesCount = (notes as any[]).length;
+  }
+
+  const reviewBody =
+    params.reviewCommentBody?.trim() ||
+    buildDefaultReviewComment({
+      summary: params.reviewSummary,
+      changedFiles,
+      existingNotesCount,
+    });
+  const reviewNote = await gitlab.createMergeRequestNote(params.codeProjectId, mr.iid, reviewBody);
+
+  if (params.approveMr) {
+    await gitlab.approveMergeRequest(params.codeProjectId, mr.iid, params.approveSha?.trim());
+  }
+
+  const issueCommentBody =
+    params.issueCommentBody?.trim() ||
+    renderIssueCompletionComment({
+      changedFiles,
+      branchName: computedBranchName,
+      codeProjectPath: params.codeProjectPath,
+      implementationSummary: params.implementationSummary ?? params.changeSummary,
+      acceptanceSteps: params.acceptanceSteps ?? params.testPlan,
+    });
+  const issueComment = await gitlab.createIssueNote(
+    params.issueProjectId,
+    params.issueIid,
+    issueCommentBody,
+  );
+
+  let localCheckout:
+    | {
+        repo_path: string;
+        remote_name: string;
+        branch_name: string;
+        commands: string[];
+        current_branch: string;
+        head_sha: string;
+      }
+    | undefined;
+  if (params.checkoutLocalBranch) {
+    const repoPath = requireStringParam(
+      params.toolName,
+      "local_repo_path",
+      params.localRepoPath,
+      config.defaults.localRepoPath,
+      "WORKFLOW_LOCAL_REPO_PATH",
+    );
+    const remoteName = requireStringParam(
+      params.toolName,
+      "local_remote_name",
+      params.localRemoteName,
+      config.defaults.localGitRemoteName,
+      "WORKFLOW_LOCAL_REMOTE_NAME",
+    );
+    localCheckout = await syncAndCheckoutLocalBranch({
+      toolName: params.toolName,
+      repoPath,
+      remoteName,
+      branchName: computedBranchName,
+      baseBranch: params.baseBranch,
+    });
+  }
+
+  let log: { updated: boolean; path?: string } = { updated: false };
+  if (params.updateLog) {
+    const logPath = requireStringParam(
+      params.toolName,
+      "log_path",
+      params.logPath,
+      config.defaults.issueLogPath,
+      "WORKFLOW_ISSUE_LOG_PATH",
+    );
+    const logStatus = params.logStatus ?? "mr_pending_review";
+    const markdown = renderIssueLogEntry({
+      date: getTodayDateString(),
+      issueTitle: issueTitle,
+      issueIid: params.issueIid,
+      issueProjectPath: params.issueProjectPath,
+      issueProjectId: params.issueProjectId,
+      issueWebUrl: typeof issue.web_url === "string" ? issue.web_url : "",
+      branchName: computedBranchName,
+      codeProjectPath: params.codeProjectPath,
+      codeProjectId: params.codeProjectId,
+      summary: params.changeSummary,
+      status: logStatus,
+    });
+    const path = await appendMarkdown(logPath, markdown);
+    await updateIssueLogWithMr({
+      logPath,
+      issueIid: params.issueIid,
+      mrIid: mr.iid,
+      mrUrl: typeof mr.web_url === "string" ? mr.web_url : "",
+      status: logStatus,
+    });
+    log = { updated: true, path };
+  }
+
+  return {
+    issue: {
+      id: issue.id,
+      iid: issue.iid,
+      web_url: issue.web_url,
+    },
+    branch: {
+      name: branch.name,
+      web_url: branch.web_url,
+    },
+    commit: {
+      id: commit?.id,
+      short_id: commit?.short_id,
+      title: commit?.title,
+      web_url: commit?.web_url,
+    },
+    merge_request: {
+      id: mr.id,
+      iid: mr.iid,
+      title: typeof mr.title === "string" ? mr.title : String(mr.title ?? ""),
+      web_url: typeof mr.web_url === "string" ? mr.web_url : "",
+    },
+    review_note: {
+      note_id: reviewNote.id,
+      body: reviewBody,
+      web_url: reviewNote?.noteable_url ?? null,
+    },
+    issue_comment: {
+      note_id: issueComment.id,
+      body: issueCommentBody,
+      web_url: issueComment?.noteable_url ?? null,
+    },
+    local_checkout: localCheckout,
+    log,
+  };
 }
 
 const commitActionSchema = z.object({
@@ -907,88 +1402,37 @@ server.registerTool(
       enforceCodeProjectLock("workflow_analyze_and_create_issue", codeProjectId);
     }
 
-    const issueProjectPath = optionalStringParam(
-      args.issue_project_path,
-      config.defaults.issueProjectPath,
-    );
+    const issueProjectPath = optionalStringParam(args.issue_project_path, config.defaults.issueProjectPath);
     const codeProjectPath = optionalStringParam(args.code_project_path, config.defaults.codeProjectPath);
-
-    const initialLabels = (() => {
-      const explicit = normalizeUniqueStringArray(args.labels);
-      if (explicit && explicit.length > 0) {
-        return explicit;
-      }
-      if (args.label?.trim()) {
-        return [args.label.trim()];
-      }
-      const parsedType = args.work_type ?? detectWorkType(args.requirement_text);
-      return detectSuggestedLabels(args.requirement_text, parsedType);
-    })();
-
-    const titleLabel = args.label?.trim() || initialLabels[0];
-    const parsed = parseRequirementMetadata({
-      requirementText: args.requirement_text,
-      englishSlug: args.english_slug,
-      workType: args.work_type,
-      summary: args.summary,
-      label: titleLabel,
-    });
-
-    const labels = await ensureLabelsExist(
-      "workflow_analyze_and_create_issue",
-      issueProjectId,
-      initialLabels,
-      args.auto_create_labels ?? true,
-    );
-
-    const issueDescription = buildIssueDescriptionFromInput({
+    const result = await executeAnalyzeAndCreateIssueWorkflow({
       toolName: "workflow_analyze_and_create_issue",
-      issueTemplate: args.issue_template,
-      templateVariables: args.template_variables,
       requirementText: args.requirement_text,
-      summary: parsed.summary,
       sourceText: args.source_text,
       expectedBehavior: args.expected_behavior,
       currentBehavior: args.current_behavior,
       given: args.given,
       when: args.when,
       then: args.then,
+      issueTemplate: args.issue_template,
+      templateVariables: args.template_variables,
+      englishSlug: args.english_slug,
+      workType: args.work_type,
+      summary: args.summary,
       issueProjectId,
       issueProjectPath,
       codeProjectId,
       codeProjectPath,
-      branchName: parsed.branchName,
-      workType: parsed.workType,
-      label: titleLabel,
-    });
-
-    const assigneeIds = await resolveIssueAssigneeIds("workflow_analyze_and_create_issue", {
-      assigneeUsernames: args.assignee_usernames,
+      labels: args.labels,
+      label: args.label,
+      autoCreateLabels: args.auto_create_labels,
       assigneeUsername: args.assignee_username,
-      assignToCurrentUserIfMissing: args.assign_to_current_user_if_missing ?? true,
-    });
-
-    const issue = await gitlab.createIssue({
-      projectId: issueProjectId,
-      title: parsed.issueTitle,
-      description: issueDescription,
-      labels,
-      assigneeIds,
+      assigneeUsernames: args.assignee_usernames,
+      assignToCurrentUserIfMissing: args.assign_to_current_user_if_missing,
     });
 
     return {
-      parsed: {
-        work_type: parsed.workType,
-        commit_type: parsed.workType,
-        summary: parsed.summary,
-        issue_title: parsed.issueTitle,
-        branch_name: parsed.branchName,
-      },
-      issue: {
-        id: issue.id,
-        iid: issue.iid,
-        web_url: issue.web_url,
-      },
+      parsed: result.parsed,
+      issue: result.issue,
     };
   }),
 );
@@ -1694,26 +2138,24 @@ server.registerTool(
         .map((path) => `- ${path}`);
     }
 
-    let noteCountLine = "";
+    let existingNotesCount: number | undefined;
     if (includeExistingNotes) {
       const notes = await gitlab.getMergeRequestNotes(codeProjectId, args.mr_iid, {
         sort: "asc",
         orderBy: "created_at",
       });
-      noteCountLine = `- Existing notes: ${(notes as any[]).length}`;
+      existingNotesCount = (notes as any[]).length;
     }
 
     const reviewBody = (() => {
       if (args.review_comment_body?.trim()) {
         return args.review_comment_body.trim();
       }
-      const summary = args.review_summary?.trim() || "已完成自动审查，请查看变更并确认。";
-      const changedFilesSection =
-        changedFileLines.length > 0
-          ? `### Changed Files\n${changedFileLines.join("\n")}`
-          : "### Changed Files\n- No changed files loaded";
-      const noteLine = noteCountLine ? `\n${noteCountLine}` : "";
-      return `## Automated MR Review\n\n### Summary\n${summary}\n\n${changedFilesSection}${noteLine}`;
+      return buildDefaultReviewComment({
+        summary: args.review_summary,
+        changedFiles: changedFileLines.map((line) => line.replace(/^- /, "")),
+        existingNotesCount,
+      });
     })();
 
     const note = await gitlab.createMergeRequestNote(codeProjectId, args.mr_iid, reviewBody);
@@ -1744,6 +2186,441 @@ server.registerTool(
         web_url: note?.noteable_url ?? null,
       },
       approval,
+    };
+  }),
+);
+
+server.registerTool(
+  "workflow_local_sync_checkout_branch",
+  {
+    description:
+      "Fetch remote changes, optionally sync base branch, then checkout/switch to target branch in local repo.",
+    outputSchema: workflowLocalSyncCheckoutBranchOutputSchema,
+    inputSchema: {
+      branch_name: z.string().min(1).describe("Target branch to checkout locally."),
+      repo_path: z
+        .string()
+        .optional()
+        .describe("Local repository path. If omitted, env WORKFLOW_LOCAL_REPO_PATH is used."),
+      remote_name: z
+        .string()
+        .optional()
+        .describe("Git remote name. If omitted, env WORKFLOW_LOCAL_REMOTE_NAME is used."),
+      base_branch: z
+        .string()
+        .optional()
+        .describe("Optional base branch to pull before checkout. If omitted, env WORKFLOW_BASE_BRANCH is used."),
+    },
+  },
+  withToolErrorHandling("workflow_local_sync_checkout_branch", async (args) => {
+    const repoPath = requireStringParam(
+      "workflow_local_sync_checkout_branch",
+      "repo_path",
+      args.repo_path,
+      config.defaults.localRepoPath,
+      "WORKFLOW_LOCAL_REPO_PATH",
+    );
+    const remoteName = requireStringParam(
+      "workflow_local_sync_checkout_branch",
+      "remote_name",
+      args.remote_name,
+      config.defaults.localGitRemoteName,
+      "WORKFLOW_LOCAL_REMOTE_NAME",
+    );
+    const baseBranch = optionalStringParam(args.base_branch, config.defaults.baseBranch);
+    return syncAndCheckoutLocalBranch({
+      toolName: "workflow_local_sync_checkout_branch",
+      repoPath,
+      remoteName,
+      branchName: args.branch_name.trim(),
+      baseBranch,
+    });
+  }),
+);
+
+server.registerTool(
+  "workflow_issue_to_mr_full",
+  {
+    description:
+      "Read existing issue, create branch, commit changes, create MR, review/comment MR, sync local branch, comment issue, and update issue log.",
+    outputSchema: workflowIssueToMrFullOutputSchema,
+    inputSchema: {
+      issue_project_id: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Issue project ID. If omitted, env WORKFLOW_ISSUE_PROJECT_ID is used."),
+      issue_project_path: z.string().optional().describe("Issue project path."),
+      issue_iid: z.number().int().positive().describe("Issue IID."),
+      code_project_id: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Code project ID. If omitted, env WORKFLOW_CODE_PROJECT_ID is used."),
+      code_project_path: z.string().optional().describe("Code project path."),
+      base_branch: z
+        .string()
+        .optional()
+        .describe("Base branch used for creating new branch. If omitted, env WORKFLOW_BASE_BRANCH is used."),
+      target_branch: z
+        .string()
+        .optional()
+        .describe("MR target branch. If omitted, env WORKFLOW_TARGET_BRANCH is used."),
+      branch_name: z.string().optional().describe("Optional branch name override."),
+      english_slug: z.string().optional().describe("Optional English slug used when generating branch name."),
+      work_type: z.enum(["feat", "fix", "chore"]).optional().describe("Optional work type override."),
+      summary: z.string().optional().describe("Optional summary used for branch/commit/MR title."),
+      commit_message: z.string().optional().describe("Optional commit message."),
+      commit_actions: z.array(commitActionSchema).optional().describe("Commit actions list."),
+      change_summary: z.string().min(1).describe("Change summary used in MR description and issue log."),
+      test_plan: z.string().min(1).describe("Test/acceptance plan used in MR description."),
+      label: z.string().optional().describe("Optional MR label."),
+      assignee_username: z.string().optional().describe("Optional assignee username for MR."),
+      review_comment_body: z.string().optional().describe("Direct MR review comment body."),
+      review_summary: z.string().optional().describe("Review summary used when generating review comment."),
+      include_changes_in_review: z
+        .boolean()
+        .optional()
+        .describe("Whether to include changed files in generated review comment."),
+      include_existing_notes_in_review: z
+        .boolean()
+        .optional()
+        .describe("Whether to include existing MR note count in generated review comment."),
+      approve_mr: z.boolean().optional().describe("Whether to approve MR after review comment."),
+      approve_sha: z
+        .string()
+        .optional()
+        .describe("Optional expected MR HEAD SHA when approve_mr=true."),
+      checkout_local_branch: z
+        .boolean()
+        .optional()
+        .describe("Whether to fetch/pull and switch local repo to target branch."),
+      local_repo_path: z
+        .string()
+        .optional()
+        .describe("Local repository path. If omitted, env WORKFLOW_LOCAL_REPO_PATH is used."),
+      local_remote_name: z
+        .string()
+        .optional()
+        .describe("Git remote name. If omitted, env WORKFLOW_LOCAL_REMOTE_NAME is used."),
+      issue_comment_body: z.string().optional().describe("Direct issue comment body."),
+      implementation_summary: z
+        .string()
+        .optional()
+        .describe("Implementation summary for generated issue comment."),
+      acceptance_steps: z
+        .string()
+        .optional()
+        .describe("Acceptance steps for generated issue comment."),
+      update_log: z.boolean().optional().describe("Whether to update local issue log."),
+      log_path: z
+        .string()
+        .optional()
+        .describe("Issue log path. If omitted and update_log=true, env WORKFLOW_ISSUE_LOG_PATH is used."),
+      log_status: z.string().optional().describe("Issue log status text."),
+    },
+  },
+  withToolErrorHandling("workflow_issue_to_mr_full", async (args) => {
+    const issueProjectId = requireNumberParam(
+      "workflow_issue_to_mr_full",
+      "issue_project_id",
+      args.issue_project_id,
+      config.defaults.issueProjectId,
+      "WORKFLOW_ISSUE_PROJECT_ID",
+    );
+    const codeProjectId = requireNumberParam(
+      "workflow_issue_to_mr_full",
+      "code_project_id",
+      args.code_project_id,
+      config.defaults.codeProjectId,
+      "WORKFLOW_CODE_PROJECT_ID",
+    );
+    enforceProjectLocks("workflow_issue_to_mr_full", issueProjectId, codeProjectId);
+
+    const baseBranch = requireStringParam(
+      "workflow_issue_to_mr_full",
+      "base_branch",
+      args.base_branch,
+      config.defaults.baseBranch,
+      "WORKFLOW_BASE_BRANCH",
+    );
+    const targetBranch = requireStringParam(
+      "workflow_issue_to_mr_full",
+      "target_branch",
+      args.target_branch,
+      config.defaults.targetBranch,
+      "WORKFLOW_TARGET_BRANCH",
+    );
+
+    if (!args.commit_actions) {
+      missingParam("workflow_issue_to_mr_full", "commit_actions");
+    }
+    const commitActions: CommitActionInput[] = args.commit_actions.map((action) => ({
+      action: action.action,
+      file_path: action.file_path?.trim(),
+      previous_path: action.previous_path?.trim(),
+      content: action.content,
+      encoding: action.encoding,
+      execute_filemode: action.execute_filemode,
+      last_commit_id: action.last_commit_id?.trim(),
+    }));
+
+    return executeIssueToMrFullWorkflow({
+      toolName: "workflow_issue_to_mr_full",
+      issueProjectId,
+      issueProjectPath: optionalStringParam(args.issue_project_path, config.defaults.issueProjectPath),
+      issueIid: args.issue_iid,
+      codeProjectId,
+      codeProjectPath: optionalStringParam(args.code_project_path, config.defaults.codeProjectPath),
+      baseBranch,
+      targetBranch,
+      branchName: args.branch_name?.trim(),
+      englishSlug: args.english_slug?.trim(),
+      workType: args.work_type,
+      summary: args.summary?.trim(),
+      commitMessage: args.commit_message?.trim(),
+      commitActions,
+      changeSummary: args.change_summary,
+      testPlan: args.test_plan,
+      label: args.label?.trim(),
+      assigneeUsername: args.assignee_username?.trim(),
+      reviewCommentBody: args.review_comment_body,
+      reviewSummary: args.review_summary,
+      includeChangesInReview: args.include_changes_in_review,
+      includeExistingNotesInReview: args.include_existing_notes_in_review,
+      approveMr: args.approve_mr,
+      approveSha: args.approve_sha,
+      checkoutLocalBranch: args.checkout_local_branch ?? true,
+      localRepoPath: args.local_repo_path,
+      localRemoteName: args.local_remote_name,
+      issueCommentBody: args.issue_comment_body,
+      implementationSummary: args.implementation_summary,
+      acceptanceSteps: args.acceptance_steps,
+      updateLog: args.update_log ?? true,
+      logPath: args.log_path,
+      logStatus: args.log_status,
+    });
+  }),
+);
+
+server.registerTool(
+  "workflow_requirement_to_delivery_full",
+  {
+    description:
+      "End-to-end chain: analyze requirement, create issue, then deliver from issue to MR with review/comment/local checkout/log.",
+    outputSchema: workflowRequirementToDeliveryFullOutputSchema,
+    inputSchema: {
+      requirement_text: z.string().min(1).describe("Raw user requirement text."),
+      source_text: z.string().optional().describe("Background/source text for issue template."),
+      expected_behavior: z.string().optional().describe("Expected behavior (used by default template)."),
+      current_behavior: z.string().optional().describe("Current behavior (optional)."),
+      given: z.string().optional().describe("GIVEN clause for acceptance criteria."),
+      when: z.string().optional().describe("WHEN clause for acceptance criteria."),
+      then: z.string().optional().describe("THEN clause for acceptance criteria."),
+      issue_template: z
+        .string()
+        .optional()
+        .describe("Optional issue markdown template. Supports variables like {{summary}}."),
+      template_variables: z
+        .record(z.string())
+        .optional()
+        .describe("Optional custom variables map merged into issue_template rendering."),
+      english_slug: z.string().optional().describe("Optional branch slug."),
+      work_type: z.enum(["feat", "fix", "chore"]).optional().describe("Optional work type override."),
+      summary: z.string().optional().describe("Optional short summary used for issue and MR title."),
+      issue_project_id: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Issue project ID. If omitted, env WORKFLOW_ISSUE_PROJECT_ID is used."),
+      issue_project_path: z.string().optional().describe("Issue project path."),
+      code_project_id: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Code project ID. If omitted, env WORKFLOW_CODE_PROJECT_ID is used."),
+      code_project_path: z.string().optional().describe("Code project path."),
+      labels: z.array(z.string()).optional().describe("Issue labels list."),
+      label: z.string().optional().describe("Issue title prefix and fallback issue label."),
+      auto_create_labels: z
+        .boolean()
+        .optional()
+        .describe("Whether to auto-create missing labels."),
+      assignee_username: z.string().optional().describe("Single assignee username."),
+      assignee_usernames: z.array(z.string()).optional().describe("Assignee usernames list."),
+      assign_to_current_user_if_missing: z
+        .boolean()
+        .optional()
+        .describe("Whether to assign issue to current user when no assignee is provided."),
+      base_branch: z
+        .string()
+        .optional()
+        .describe("Base branch for creating code branch. If omitted, env WORKFLOW_BASE_BRANCH is used."),
+      target_branch: z
+        .string()
+        .optional()
+        .describe("MR target branch. If omitted, env WORKFLOW_TARGET_BRANCH is used."),
+      branch_name: z.string().optional().describe("Optional branch name override."),
+      commit_message: z.string().optional().describe("Optional commit message."),
+      commit_actions: z.array(commitActionSchema).optional().describe("Commit actions list."),
+      change_summary: z.string().min(1).describe("Change summary used in MR/log."),
+      test_plan: z.string().min(1).describe("Test/acceptance plan used in MR/comment."),
+      review_comment_body: z.string().optional().describe("Direct MR review comment body."),
+      review_summary: z.string().optional().describe("Review summary for generated MR review comment."),
+      include_changes_in_review: z
+        .boolean()
+        .optional()
+        .describe("Whether to include changed files in generated review comment."),
+      include_existing_notes_in_review: z
+        .boolean()
+        .optional()
+        .describe("Whether to include existing MR note count in generated review comment."),
+      approve_mr: z.boolean().optional().describe("Whether to approve MR after review comment."),
+      approve_sha: z.string().optional().describe("Optional expected MR HEAD SHA when approve_mr=true."),
+      checkout_local_branch: z
+        .boolean()
+        .optional()
+        .describe("Whether to sync and switch local repo to created branch."),
+      local_repo_path: z
+        .string()
+        .optional()
+        .describe("Local repository path. If omitted, env WORKFLOW_LOCAL_REPO_PATH is used."),
+      local_remote_name: z
+        .string()
+        .optional()
+        .describe("Git remote name. If omitted, env WORKFLOW_LOCAL_REMOTE_NAME is used."),
+      issue_comment_body: z.string().optional().describe("Direct issue comment body."),
+      implementation_summary: z
+        .string()
+        .optional()
+        .describe("Implementation summary for generated issue comment."),
+      acceptance_steps: z.string().optional().describe("Acceptance steps for generated issue comment."),
+      update_log: z.boolean().optional().describe("Whether to update local issue log."),
+      log_path: z
+        .string()
+        .optional()
+        .describe("Issue log path. If omitted and update_log=true, env WORKFLOW_ISSUE_LOG_PATH is used."),
+      log_status: z.string().optional().describe("Issue log status text."),
+    },
+  },
+  withToolErrorHandling("workflow_requirement_to_delivery_full", async (args) => {
+    const issueProjectId = requireNumberParam(
+      "workflow_requirement_to_delivery_full",
+      "issue_project_id",
+      args.issue_project_id,
+      config.defaults.issueProjectId,
+      "WORKFLOW_ISSUE_PROJECT_ID",
+    );
+    const codeProjectId = requireNumberParam(
+      "workflow_requirement_to_delivery_full",
+      "code_project_id",
+      args.code_project_id,
+      config.defaults.codeProjectId,
+      "WORKFLOW_CODE_PROJECT_ID",
+    );
+    enforceProjectLocks("workflow_requirement_to_delivery_full", issueProjectId, codeProjectId);
+
+    const issueProjectPath = optionalStringParam(args.issue_project_path, config.defaults.issueProjectPath);
+    const codeProjectPath = optionalStringParam(args.code_project_path, config.defaults.codeProjectPath);
+
+    const created = await executeAnalyzeAndCreateIssueWorkflow({
+      toolName: "workflow_requirement_to_delivery_full",
+      requirementText: args.requirement_text,
+      sourceText: args.source_text,
+      expectedBehavior: args.expected_behavior,
+      currentBehavior: args.current_behavior,
+      given: args.given,
+      when: args.when,
+      then: args.then,
+      issueTemplate: args.issue_template,
+      templateVariables: args.template_variables,
+      englishSlug: args.english_slug,
+      workType: args.work_type,
+      summary: args.summary,
+      issueProjectId,
+      issueProjectPath,
+      codeProjectId,
+      codeProjectPath,
+      labels: args.labels,
+      label: args.label,
+      autoCreateLabels: args.auto_create_labels,
+      assigneeUsername: args.assignee_username,
+      assigneeUsernames: args.assignee_usernames,
+      assignToCurrentUserIfMissing: args.assign_to_current_user_if_missing,
+    });
+
+    const baseBranch = requireStringParam(
+      "workflow_requirement_to_delivery_full",
+      "base_branch",
+      args.base_branch,
+      config.defaults.baseBranch,
+      "WORKFLOW_BASE_BRANCH",
+    );
+    const targetBranch = requireStringParam(
+      "workflow_requirement_to_delivery_full",
+      "target_branch",
+      args.target_branch,
+      config.defaults.targetBranch,
+      "WORKFLOW_TARGET_BRANCH",
+    );
+
+    if (!args.commit_actions) {
+      missingParam("workflow_requirement_to_delivery_full", "commit_actions");
+    }
+    const commitActions: CommitActionInput[] = args.commit_actions.map((action) => ({
+      action: action.action,
+      file_path: action.file_path?.trim(),
+      previous_path: action.previous_path?.trim(),
+      content: action.content,
+      encoding: action.encoding,
+      execute_filemode: action.execute_filemode,
+      last_commit_id: action.last_commit_id?.trim(),
+    }));
+
+    const delivery = await executeIssueToMrFullWorkflow({
+      toolName: "workflow_requirement_to_delivery_full",
+      issueProjectId,
+      issueProjectPath,
+      issueIid: created.issue.iid,
+      codeProjectId,
+      codeProjectPath,
+      baseBranch,
+      targetBranch,
+      branchName: args.branch_name?.trim() || created.parsed.branch_name,
+      englishSlug: args.english_slug?.trim(),
+      workType: args.work_type,
+      summary: args.summary ?? created.parsed.summary,
+      commitMessage: args.commit_message?.trim(),
+      commitActions,
+      changeSummary: args.change_summary,
+      testPlan: args.test_plan,
+      label: args.label?.trim(),
+      assigneeUsername: args.assignee_username?.trim(),
+      reviewCommentBody: args.review_comment_body,
+      reviewSummary: args.review_summary,
+      includeChangesInReview: args.include_changes_in_review,
+      includeExistingNotesInReview: args.include_existing_notes_in_review,
+      approveMr: args.approve_mr,
+      approveSha: args.approve_sha,
+      checkoutLocalBranch: args.checkout_local_branch ?? true,
+      localRepoPath: args.local_repo_path,
+      localRemoteName: args.local_remote_name,
+      issueCommentBody: args.issue_comment_body,
+      implementationSummary: args.implementation_summary,
+      acceptanceSteps: args.acceptance_steps,
+      updateLog: args.update_log ?? true,
+      logPath: args.log_path,
+      logStatus: args.log_status,
+    });
+
+    return {
+      created_issue: created.issue,
+      parsed: created.parsed,
+      delivery,
     };
   }),
 );
