@@ -80,6 +80,29 @@ const workflowCompleteDataSchema = z.object({
   log: logUpdateSchema.describe("Issue log update result."),
 });
 
+const workflowAnalyzeAndCreateIssueDataSchema = z.object({
+  parsed: workflowParseRequirementDataSchema.describe("Parsed requirement metadata."),
+  issue: issueBriefSchema.describe("Created issue metadata."),
+});
+
+const workflowReviewMrAndCommentDataSchema = z.object({
+  merge_request: mergeRequestBriefSchema.describe("Target merge request metadata."),
+  review_note: z
+    .object({
+      note_id: z.number().describe("Created review note ID."),
+      body: z.string().describe("Review note markdown body."),
+      web_url: z.string().nullable().describe("MR/note URL when available."),
+    })
+    .describe("Review comment result."),
+  approval: z
+    .object({
+      approved: z.boolean().describe("Whether approval action was executed."),
+      response: z.unknown().optional().describe("Raw GitLab approval response."),
+    })
+    .optional()
+    .describe("Approval execution result when requested."),
+});
+
 const gitlabIssueSchema = z
   .object({
     id: z.number().describe("Issue global ID."),
@@ -263,6 +286,14 @@ export const workflowCreateMergeRequestOutputSchema = createToolOutputSchema(
 export const workflowCompleteOutputSchema = createToolOutputSchema(
   workflowCompleteDataSchema,
   "Workflow completion result.",
+);
+export const workflowAnalyzeAndCreateIssueOutputSchema = createToolOutputSchema(
+  workflowAnalyzeAndCreateIssueDataSchema,
+  "Analyze requirement and create issue workflow result.",
+);
+export const workflowReviewMrAndCommentOutputSchema = createToolOutputSchema(
+  workflowReviewMrAndCommentDataSchema,
+  "Review merge request and create comment workflow result.",
 );
 
 export const gitlabCreateIssueOutputSchema = createToolOutputSchema(

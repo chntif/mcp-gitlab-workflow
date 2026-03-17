@@ -43,10 +43,12 @@ import {
   gitlabUnapproveMrOutputSchema,
   gitlabUploadProjectFileOutputSchema,
   workflowAddIssueCommentOutputSchema,
+  workflowAnalyzeAndCreateIssueOutputSchema,
   workflowAppendIssueLogOutputSchema,
   workflowCompleteOutputSchema,
   workflowCreateMergeRequestOutputSchema,
   workflowParseRequirementOutputSchema,
+  workflowReviewMrAndCommentOutputSchema,
   workflowStartOutputSchema,
 } from "./output-schemas.js";
 
@@ -95,6 +97,97 @@ function inferWorkTypeFromBranch(branchName: string): WorkType {
     return prefix;
   }
   return "feat";
+}
+
+function parseRequirementMetadata(params: {
+  requirementText: string;
+  englishSlug?: string;
+  workType?: WorkType;
+  summary?: string;
+  label?: string;
+}) {
+  const parsedWorkType = params.workType ?? detectWorkType(params.requirementText);
+  const issueSummary = params.summary ?? summarizeRequirement(params.requirementText, 30);
+  const issueTitle = buildIssueTitle(issueSummary, params.label);
+  const branchName = buildBranchName({
+    workType: parsedWorkType,
+    englishSlug: params.englishSlug,
+    requirementText: params.requirementText,
+  });
+  return {
+    workType: parsedWorkType,
+    summary: issueSummary,
+    issueTitle,
+    branchName,
+  };
+}
+
+function buildIssueDescriptionFromInput(params: {
+  toolName: string;
+  issueTemplate?: string;
+  templateVariables?: Record<string, string>;
+  requirementText: string;
+  summary: string;
+  sourceText?: string;
+  expectedBehavior?: string;
+  currentBehavior?: string;
+  given?: string;
+  when?: string;
+  then?: string;
+  issueProjectId: number;
+  issueProjectPath?: string;
+  codeProjectId?: number;
+  codeProjectPath?: string;
+  branchName: string;
+  workType: WorkType;
+  label?: string;
+}): string {
+  if (params.issueTemplate) {
+    const variables = {
+      requirement_text: params.requirementText,
+      summary: params.summary,
+      source_text: params.sourceText ?? params.requirementText,
+      expected_behavior: params.expectedBehavior ?? "",
+      current_behavior: params.currentBehavior ?? "",
+      given: params.given ?? "",
+      when: params.when ?? "",
+      then: params.then ?? "",
+      issue_project_id: String(params.issueProjectId),
+      code_project_id: String(params.codeProjectId ?? ""),
+      issue_project_path: params.issueProjectPath ?? "",
+      code_project_path: params.codeProjectPath ?? "",
+      branch_name: params.branchName,
+      work_type: params.workType,
+      label: params.label ?? "",
+    };
+    return renderTemplate(params.issueTemplate, {
+      ...variables,
+      ...(params.templateVariables ?? {}),
+    });
+  }
+
+  if (!params.expectedBehavior) {
+    missingParam(params.toolName, "expected_behavior");
+  }
+  if (!params.given) {
+    missingParam(params.toolName, "given");
+  }
+  if (!params.when) {
+    missingParam(params.toolName, "when");
+  }
+  if (!params.then) {
+    missingParam(params.toolName, "then");
+  }
+
+  return buildDefaultIssueDescription({
+    sourceText: params.sourceText ?? params.requirementText,
+    expectedBehavior: params.expectedBehavior,
+    currentBehavior: params.currentBehavior,
+    given: params.given,
+    when: params.when,
+    then: params.then,
+    repoPath: params.codeProjectPath,
+  });
 }
 
 function missingParam(toolName: string, fieldName: string, envVarName?: string): never {
@@ -503,6 +596,97 @@ function extractImageReferences(markdownOrHtml: string): ParsedImageRef[] {
   return results;
 }
 
+const DEFAULT_LABEL_COLOR_MAP: Record<string, string> = {
+  前端: "#1D76DB",
+  后端: "#0E8A16",
+  BUG: "#D73A4A",
+  UI: "#FBCA04",
+};
+
+function pickLabelColor(label: string): string {
+  return DEFAULT_LABEL_COLOR_MAP[label] ?? "#428BCA";
+}
+
+function detectSuggestedLabels(requirementText: string, workType: WorkType): string[] {
+  const normalized = requirementText.toLowerCase();
+  const labels: string[] = [];
+  if (normalized.includes("ui") || normalized.includes("样式") || normalized.includes("界面")) {
+    labels.push("UI");
+  }
+  if (
+    normalized.includes("front") ||
+    normalized.includes("frontend") ||
+    normalized.includes("前端")
+  ) {
+    labels.push("前端");
+  }
+  if (
+    normalized.includes("back") ||
+    normalized.includes("backend") ||
+    normalized.includes("后端") ||
+    normalized.includes("api")
+  ) {
+    labels.push("后端");
+  }
+  if (workType === "fix" || normalized.includes("bug") || normalized.includes("错误")) {
+    labels.push("BUG");
+  }
+  if (labels.length === 0) {
+    labels.push("前端");
+  }
+  return [...new Set(labels)];
+}
+
+async function ensureLabelsExist(
+  toolName: string,
+  projectId: number,
+  labels: string[],
+  autoCreate: boolean,
+): Promise<string[]> {
+  const normalized = normalizeUniqueStringArray(labels) ?? [];
+  if (normalized.length === 0) {
+    return [];
+  }
+  if (!autoCreate) {
+    return normalized;
+  }
+
+  const existingLabels = await gitlab.listLabels(projectId, {
+    page: 1,
+    perPage: 100,
+  });
+  const existingNames = new Set(
+    (existingLabels as any[])
+      .map((item) => (typeof item?.name === "string" ? item.name.trim().toLowerCase() : ""))
+      .filter((name) => name.length > 0),
+  );
+
+  for (const label of normalized) {
+    if (existingNames.has(label.toLowerCase())) {
+      continue;
+    }
+    try {
+      await gitlab.createLabel({
+        projectId,
+        name: label,
+        color: pickLabelColor(label),
+      });
+      existingNames.add(label.toLowerCase());
+    } catch (error) {
+      if (error instanceof Error && /already exists/i.test(error.message)) {
+        continue;
+      }
+      throw new ToolInputError(
+        `[${toolName}] Failed to auto-create label '${label}': ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  return normalized;
+}
+
 function validateCommitActions(toolName: string, actions: CommitActionInput[]) {
   if (actions.length === 0) {
     missingParam(toolName, "actions");
@@ -634,21 +818,177 @@ server.registerTool(
     },
   },
   withToolErrorHandling("workflow_parse_requirement", async (args) => {
-    const parsedWorkType = args.work_type ?? detectWorkType(args.requirement_text);
-    const issueSummary = args.summary ?? summarizeRequirement(args.requirement_text, 30);
-    const issueTitle = buildIssueTitle(issueSummary, args.label);
-    const branchName = buildBranchName({
-      workType: parsedWorkType,
-      englishSlug: args.english_slug,
+    const parsed = parseRequirementMetadata({
       requirementText: args.requirement_text,
+      englishSlug: args.english_slug,
+      workType: args.work_type,
+      summary: args.summary,
+      label: args.label,
     });
 
     return {
-      work_type: parsedWorkType,
-      commit_type: parsedWorkType,
-      summary: issueSummary,
-      issue_title: issueTitle,
-      branch_name: branchName,
+      work_type: parsed.workType,
+      commit_type: parsed.workType,
+      summary: parsed.summary,
+      issue_title: parsed.issueTitle,
+      branch_name: parsed.branchName,
+    };
+  }),
+);
+
+server.registerTool(
+  "workflow_analyze_and_create_issue",
+  {
+    description:
+      "Analyze requirement text and create issue only (without creating code branch).",
+    outputSchema: workflowAnalyzeAndCreateIssueOutputSchema,
+    inputSchema: {
+      requirement_text: z.string().min(1).describe("Raw user requirement text."),
+      source_text: z.string().optional().describe("Background/source text for issue template."),
+      expected_behavior: z.string().optional().describe("Expected behavior (used by default template)."),
+      current_behavior: z.string().optional().describe("Current behavior (optional)."),
+      given: z.string().optional().describe("GIVEN clause for acceptance criteria."),
+      when: z.string().optional().describe("WHEN clause for acceptance criteria."),
+      then: z.string().optional().describe("THEN clause for acceptance criteria."),
+      issue_template: z
+        .string()
+        .optional()
+        .describe("Optional issue markdown template. Supports variables like {{summary}}."),
+      template_variables: z
+        .record(z.string())
+        .optional()
+        .describe("Optional custom variables map merged into issue_template rendering."),
+      english_slug: z.string().optional().describe("Optional branch slug."),
+      work_type: z.enum(["feat", "fix", "chore"]).optional().describe("Optional work type override."),
+      summary: z.string().optional().describe("Optional issue summary."),
+      issue_project_id: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Issue project ID. If omitted, env WORKFLOW_ISSUE_PROJECT_ID is used."),
+      issue_project_path: z.string().optional().describe("Issue project path for issue template variables."),
+      code_project_id: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Optional code project ID used in issue template variables."),
+      code_project_path: z.string().optional().describe("Code project path for template/render context."),
+      labels: z.array(z.string()).optional().describe("Issue labels list."),
+      label: z.string().optional().describe("Issue title prefix label and fallback issue label."),
+      auto_create_labels: z
+        .boolean()
+        .optional()
+        .describe("When true, create missing labels in issue project automatically."),
+      assignee_username: z.string().optional().describe("Single assignee username."),
+      assignee_usernames: z.array(z.string()).optional().describe("Assignee usernames list."),
+      assign_to_current_user_if_missing: z
+        .boolean()
+        .optional()
+        .describe("When true, assign issue to current token user if no assignee is provided."),
+    },
+  },
+  withToolErrorHandling("workflow_analyze_and_create_issue", async (args) => {
+    const issueProjectId = requireNumberParam(
+      "workflow_analyze_and_create_issue",
+      "issue_project_id",
+      args.issue_project_id,
+      config.defaults.issueProjectId,
+      "WORKFLOW_ISSUE_PROJECT_ID",
+    );
+    enforceIssueProjectLock("workflow_analyze_and_create_issue", issueProjectId);
+
+    const codeProjectId =
+      args.code_project_id ??
+      config.defaults.codeProjectId;
+    if (codeProjectId !== undefined) {
+      ensurePositiveIntOptional("workflow_analyze_and_create_issue", "code_project_id", codeProjectId);
+      enforceCodeProjectLock("workflow_analyze_and_create_issue", codeProjectId);
+    }
+
+    const issueProjectPath = optionalStringParam(
+      args.issue_project_path,
+      config.defaults.issueProjectPath,
+    );
+    const codeProjectPath = optionalStringParam(args.code_project_path, config.defaults.codeProjectPath);
+
+    const initialLabels = (() => {
+      const explicit = normalizeUniqueStringArray(args.labels);
+      if (explicit && explicit.length > 0) {
+        return explicit;
+      }
+      if (args.label?.trim()) {
+        return [args.label.trim()];
+      }
+      const parsedType = args.work_type ?? detectWorkType(args.requirement_text);
+      return detectSuggestedLabels(args.requirement_text, parsedType);
+    })();
+
+    const titleLabel = args.label?.trim() || initialLabels[0];
+    const parsed = parseRequirementMetadata({
+      requirementText: args.requirement_text,
+      englishSlug: args.english_slug,
+      workType: args.work_type,
+      summary: args.summary,
+      label: titleLabel,
+    });
+
+    const labels = await ensureLabelsExist(
+      "workflow_analyze_and_create_issue",
+      issueProjectId,
+      initialLabels,
+      args.auto_create_labels ?? true,
+    );
+
+    const issueDescription = buildIssueDescriptionFromInput({
+      toolName: "workflow_analyze_and_create_issue",
+      issueTemplate: args.issue_template,
+      templateVariables: args.template_variables,
+      requirementText: args.requirement_text,
+      summary: parsed.summary,
+      sourceText: args.source_text,
+      expectedBehavior: args.expected_behavior,
+      currentBehavior: args.current_behavior,
+      given: args.given,
+      when: args.when,
+      then: args.then,
+      issueProjectId,
+      issueProjectPath,
+      codeProjectId,
+      codeProjectPath,
+      branchName: parsed.branchName,
+      workType: parsed.workType,
+      label: titleLabel,
+    });
+
+    const assigneeIds = await resolveIssueAssigneeIds("workflow_analyze_and_create_issue", {
+      assigneeUsernames: args.assignee_usernames,
+      assigneeUsername: args.assignee_username,
+      assignToCurrentUserIfMissing: args.assign_to_current_user_if_missing ?? true,
+    });
+
+    const issue = await gitlab.createIssue({
+      projectId: issueProjectId,
+      title: parsed.issueTitle,
+      description: issueDescription,
+      labels,
+      assigneeIds,
+    });
+
+    return {
+      parsed: {
+        work_type: parsed.workType,
+        commit_type: parsed.workType,
+        summary: parsed.summary,
+        issue_title: parsed.issueTitle,
+        branch_name: parsed.branchName,
+      },
+      issue: {
+        id: issue.id,
+        iid: issue.iid,
+        web_url: issue.web_url,
+      },
     };
   }),
 );
@@ -702,7 +1042,12 @@ server.registerTool(
         .string()
         .optional()
         .describe("Base branch used to create new branch. If omitted, env WORKFLOW_BASE_BRANCH is used."),
-      label: z.string().optional().describe("Issue label (optional)."),
+      labels: z.array(z.string()).optional().describe("Issue labels list."),
+      label: z.string().optional().describe("Issue title prefix label and fallback issue label."),
+      auto_create_labels: z
+        .boolean()
+        .optional()
+        .describe("When true, create missing labels in issue project automatically."),
       assignee_username: z
         .string()
         .optional()
@@ -752,66 +1097,54 @@ server.registerTool(
 
     const issueProjectPath = optionalStringParam(args.issue_project_path, config.defaults.issueProjectPath);
     const codeProjectPath = optionalStringParam(args.code_project_path, config.defaults.codeProjectPath);
-    const label = optionalStringParam(args.label, config.defaults.label);
     const assigneeUsername = optionalStringParam(args.assignee_username, config.defaults.assigneeUsername);
 
-    const parsedWorkType = args.work_type ?? detectWorkType(args.requirement_text);
-    const issueSummary = args.summary ?? summarizeRequirement(args.requirement_text, 30);
-    const issueTitle = buildIssueTitle(issueSummary, label);
-    const branchName = buildBranchName({
-      workType: parsedWorkType,
-      englishSlug: args.english_slug,
+    const explicitLabels = normalizeUniqueStringArray(args.labels);
+    const fallbackLabel = optionalStringParam(args.label, config.defaults.label);
+    const parsedLabelForType = args.work_type ?? detectWorkType(args.requirement_text);
+    const initialLabels =
+      explicitLabels && explicitLabels.length > 0
+        ? explicitLabels
+        : fallbackLabel
+          ? [fallbackLabel]
+          : detectSuggestedLabels(args.requirement_text, parsedLabelForType);
+    const titleLabel = fallbackLabel ?? initialLabels[0];
+
+    const parsed = parseRequirementMetadata({
       requirementText: args.requirement_text,
+      englishSlug: args.english_slug,
+      workType: args.work_type,
+      summary: args.summary,
+      label: titleLabel,
     });
 
-    const issueDescription = (() => {
-      if (args.issue_template) {
-        const variables = {
-          requirement_text: args.requirement_text,
-          summary: issueSummary,
-          source_text: args.source_text ?? args.requirement_text,
-          expected_behavior: args.expected_behavior ?? "",
-          current_behavior: args.current_behavior ?? "",
-          given: args.given ?? "",
-          when: args.when ?? "",
-          then: args.then ?? "",
-          issue_project_id: String(issueProjectId),
-          code_project_id: String(codeProjectId),
-          issue_project_path: issueProjectPath ?? "",
-          code_project_path: codeProjectPath ?? "",
-          branch_name: branchName,
-          work_type: parsedWorkType,
-          label: label ?? "",
-        };
-        return renderTemplate(args.issue_template, {
-          ...variables,
-          ...(args.template_variables ?? {}),
-        });
-      }
+    const labels = await ensureLabelsExist(
+      "workflow_start",
+      issueProjectId,
+      initialLabels,
+      args.auto_create_labels ?? true,
+    );
 
-      if (!args.expected_behavior) {
-        missingParam("workflow_start", "expected_behavior");
-      }
-      if (!args.given) {
-        missingParam("workflow_start", "given");
-      }
-      if (!args.when) {
-        missingParam("workflow_start", "when");
-      }
-      if (!args.then) {
-        missingParam("workflow_start", "then");
-      }
-
-      return buildDefaultIssueDescription({
-        sourceText: args.source_text ?? args.requirement_text,
-        expectedBehavior: args.expected_behavior,
-        currentBehavior: args.current_behavior,
-        given: args.given,
-        when: args.when,
-        then: args.then,
-        repoPath: codeProjectPath,
-      });
-    })();
+    const issueDescription = buildIssueDescriptionFromInput({
+      toolName: "workflow_start",
+      issueTemplate: args.issue_template,
+      templateVariables: args.template_variables,
+      requirementText: args.requirement_text,
+      summary: parsed.summary,
+      sourceText: args.source_text,
+      expectedBehavior: args.expected_behavior,
+      currentBehavior: args.current_behavior,
+      given: args.given,
+      when: args.when,
+      then: args.then,
+      issueProjectId,
+      issueProjectPath,
+      codeProjectId,
+      codeProjectPath,
+      branchName: parsed.branchName,
+      workType: parsed.workType,
+      label: titleLabel,
+    });
 
     const assigneeIds = await resolveIssueAssigneeIds("workflow_start", {
       assigneeUsernames: args.assignee_usernames,
@@ -820,13 +1153,13 @@ server.registerTool(
     });
     const issue = await gitlab.createIssue({
       projectId: issueProjectId,
-      title: issueTitle,
+      title: parsed.issueTitle,
       description: issueDescription,
-      labels: label ? [label] : undefined,
+      labels,
       assigneeIds,
     });
 
-    const branch = await gitlab.createBranch(codeProjectId, branchName, baseBranch);
+    const branch = await gitlab.createBranch(codeProjectId, parsed.branchName, baseBranch);
 
     let logResult: { updated: boolean; path?: string } = { updated: false };
     if (args.append_log) {
@@ -839,15 +1172,15 @@ server.registerTool(
       );
       const markdown = renderIssueLogEntry({
         date: getTodayDateString(),
-        issueTitle,
+        issueTitle: parsed.issueTitle,
         issueIid: issue.iid,
         issueProjectPath,
         issueProjectId,
         issueWebUrl: issue.web_url,
-        branchName,
+        branchName: parsed.branchName,
         codeProjectPath,
         codeProjectId,
-        summary: issueSummary,
+        summary: parsed.summary,
         status: "in_progress",
       });
       const path = await appendMarkdown(logPath, markdown);
@@ -856,10 +1189,11 @@ server.registerTool(
 
     return {
       parsed: {
-        work_type: parsedWorkType,
-        summary: issueSummary,
-        issue_title: issueTitle,
-        branch_name: branchName,
+        work_type: parsed.workType,
+        commit_type: parsed.workType,
+        summary: parsed.summary,
+        issue_title: parsed.issueTitle,
+        branch_name: parsed.branchName,
       },
       issue: {
         id: issue.id,
@@ -1132,8 +1466,8 @@ server.registerTool(
       merge_request: {
         id: mr.id,
         iid: mr.iid,
-        title: mr.title,
-        web_url: mr.web_url,
+        title: typeof mr.title === "string" ? mr.title : String(mr.title ?? ""),
+        web_url: typeof mr.web_url === "string" ? mr.web_url : "",
       },
       log,
     };
@@ -1292,6 +1626,124 @@ server.registerTool(
         web_url: mr.web_url,
       },
       log,
+    };
+  }),
+);
+
+server.registerTool(
+  "workflow_review_mr_and_comment",
+  {
+    description:
+      "Review merge request metadata/changes and create a review comment, optionally approving it.",
+    outputSchema: workflowReviewMrAndCommentOutputSchema,
+    inputSchema: {
+      code_project_id: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Code project ID. If omitted, env WORKFLOW_CODE_PROJECT_ID is used."),
+      mr_iid: z.number().int().positive().describe("Merge request IID."),
+      review_comment_body: z
+        .string()
+        .optional()
+        .describe("Direct review comment markdown body."),
+      review_summary: z
+        .string()
+        .optional()
+        .describe("Short review summary used when review_comment_body is missing."),
+      include_changes: z
+        .boolean()
+        .optional()
+        .describe("Whether to include changed files list in generated review comment."),
+      include_existing_notes: z
+        .boolean()
+        .optional()
+        .describe("Whether to load existing MR notes and include count in generated comment."),
+      approve: z
+        .boolean()
+        .optional()
+        .describe("Whether to approve MR after posting review comment."),
+      sha: z
+        .string()
+        .optional()
+        .describe("Optional expected MR HEAD SHA when approve=true."),
+    },
+  },
+  withToolErrorHandling("workflow_review_mr_and_comment", async (args) => {
+    const codeProjectId = requireNumberParam(
+      "workflow_review_mr_and_comment",
+      "code_project_id",
+      args.code_project_id,
+      config.defaults.codeProjectId,
+      "WORKFLOW_CODE_PROJECT_ID",
+    );
+    enforceCodeProjectLock("workflow_review_mr_and_comment", codeProjectId);
+
+    const mr = await gitlab.getMergeRequest(codeProjectId, args.mr_iid);
+    const includeChanges = args.include_changes ?? true;
+    const includeExistingNotes = args.include_existing_notes ?? false;
+
+    let changedFileLines: string[] = [];
+    if (includeChanges) {
+      const changes = await gitlab.getMergeRequestChanges(codeProjectId, args.mr_iid);
+      changedFileLines = ((changes?.changes ?? []) as any[])
+        .map((item) => (typeof item?.new_path === "string" ? item.new_path : item?.old_path))
+        .filter((path): path is string => typeof path === "string")
+        .slice(0, 20)
+        .map((path) => `- ${path}`);
+    }
+
+    let noteCountLine = "";
+    if (includeExistingNotes) {
+      const notes = await gitlab.getMergeRequestNotes(codeProjectId, args.mr_iid, {
+        sort: "asc",
+        orderBy: "created_at",
+      });
+      noteCountLine = `- Existing notes: ${(notes as any[]).length}`;
+    }
+
+    const reviewBody = (() => {
+      if (args.review_comment_body?.trim()) {
+        return args.review_comment_body.trim();
+      }
+      const summary = args.review_summary?.trim() || "已完成自动审查，请查看变更并确认。";
+      const changedFilesSection =
+        changedFileLines.length > 0
+          ? `### Changed Files\n${changedFileLines.join("\n")}`
+          : "### Changed Files\n- No changed files loaded";
+      const noteLine = noteCountLine ? `\n${noteCountLine}` : "";
+      return `## Automated MR Review\n\n### Summary\n${summary}\n\n${changedFilesSection}${noteLine}`;
+    })();
+
+    const note = await gitlab.createMergeRequestNote(codeProjectId, args.mr_iid, reviewBody);
+
+    let approval: { approved: boolean; response?: unknown } | undefined;
+    if (args.approve) {
+      const approvalResponse = await gitlab.approveMergeRequest(
+        codeProjectId,
+        args.mr_iid,
+        args.sha?.trim(),
+      );
+      approval = {
+        approved: true,
+        response: approvalResponse,
+      };
+    }
+
+    return {
+      merge_request: {
+        id: mr.id,
+        iid: mr.iid,
+        title: mr.title,
+        web_url: mr.web_url,
+      },
+      review_note: {
+        note_id: note.id,
+        body: reviewBody,
+        web_url: note?.noteable_url ?? null,
+      },
+      approval,
     };
   }),
 );
