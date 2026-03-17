@@ -81,6 +81,16 @@ export interface MergeRequestNotesOptions {
   orderBy?: "created_at" | "updated_at";
 }
 
+export interface ListMergeRequestsOptions {
+  state?: "opened" | "closed" | "locked" | "merged" | "all";
+  sourceBranch?: string;
+  targetBranch?: string;
+  orderBy?: "created_at" | "title" | "updated_at";
+  sort?: "asc" | "desc";
+  page?: number;
+  perPage?: number;
+}
+
 export interface UploadProjectFileInput {
   projectId: number;
   filename: string;
@@ -399,6 +409,36 @@ export class GitLabClient {
         method: "GET",
       },
     );
+  }
+
+  async listMergeRequests(projectId: number, options?: ListMergeRequestsOptions): Promise<any> {
+    const query: Record<string, QueryValue> = {};
+    if (options?.state) {
+      query.state = options.state;
+    }
+    if (options?.sourceBranch) {
+      query.source_branch = options.sourceBranch;
+    }
+    if (options?.targetBranch) {
+      query.target_branch = options.targetBranch;
+    }
+    if (options?.orderBy) {
+      query.order_by = options.orderBy;
+    }
+    if (options?.sort) {
+      query.sort = options.sort;
+    }
+    if (options?.page !== undefined) {
+      query.page = options.page;
+    }
+    if (options?.perPage !== undefined) {
+      query.per_page = options.perPage;
+    }
+
+    return this.request(`/projects/${encodeURIComponent(String(projectId))}/merge_requests`, {
+      method: "GET",
+      query,
+    });
   }
 
   async getMergeRequestChanges(projectId: number, mrIid: number): Promise<any> {

@@ -43,10 +43,8 @@ import {
   gitlabUpdateLabelOutputSchema,
   gitlabUnapproveMrOutputSchema,
   gitlabUploadProjectFileOutputSchema,
-  workflowAddIssueCommentOutputSchema,
   workflowAnalyzeAndCreateIssueOutputSchema,
   workflowAppendIssueLogOutputSchema,
-  workflowCreateMergeRequestOutputSchema,
   workflowIssueToMrFullOutputSchema,
   workflowLocalSyncCheckoutBranchOutputSchema,
   workflowRequirementToDeliveryFullOutputSchema,
@@ -905,6 +903,149 @@ function buildDefaultReviewComment(params: {
   return `## Automated MR Review\n\n### Summary\n${summary}\n\n### Changed Files\n${changedFilesSection}${noteLine}`;
 }
 
+function buildIssueReferenceText(params: {
+  issueIid: number;
+  issueProjectId?: number;
+  issueProjectPath?: string;
+}): string {
+  const issueProjectPath = params.issueProjectPath?.trim();
+  if (issueProjectPath) {
+    return `${issueProjectPath}#${params.issueIid}`;
+  }
+  if (params.issueProjectId !== undefined) {
+    return `project_id=${params.issueProjectId}, issue_iid=${params.issueIid}`;
+  }
+  return `issue_iid=${params.issueIid}`;
+}
+
+function withIssueReferenceInMrDescription(params: {
+  description?: string;
+  issueIid?: number;
+  issueProjectId?: number;
+  issueProjectPath?: string;
+}): string | undefined {
+  const description = params.description?.trim();
+  if (params.issueIid === undefined) {
+    return description || undefined;
+  }
+
+  const issueRef = buildIssueReferenceText({
+    issueIid: params.issueIid,
+    issueProjectId: params.issueProjectId,
+    issueProjectPath: params.issueProjectPath,
+  });
+  const issueSection = `## Related issue\n${issueRef}`;
+  if (!description) {
+    return issueSection;
+  }
+  return `${issueSection}\n\n${description}`;
+}
+
+function compactText(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function clipText(value: string, maxLength: number): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+  return `${value.slice(0, maxLength - 3)}...`;
+}
+
+function extractChangedFilePaths(changesPayload: any, maxFiles: number): string[] {
+  const rows: any[] = Array.isArray(changesPayload?.changes) ? changesPayload.changes : [];
+  const files: string[] = rows
+    .map((item: any) => {
+      if (typeof item?.new_path === "string" && item.new_path.trim()) {
+        return item.new_path.trim();
+      }
+      if (typeof item?.old_path === "string" && item.old_path.trim()) {
+        return item.old_path.trim();
+      }
+      return undefined;
+    })
+    .filter((item: string | undefined): item is string => Boolean(item));
+  return [...new Set(files)].slice(0, maxFiles);
+}
+
+async function resolveBranchNameForAutoIssueComment(params: {
+  toolName: string;
+  branchName?: string;
+  localRepoPath?: string;
+}): Promise<string> {
+  const fromArg = params.branchName?.trim();
+  if (fromArg) {
+    return fromArg;
+  }
+
+  const localRepoPath = optionalStringParam(params.localRepoPath, config.defaults.localRepoPath);
+  if (!localRepoPath) {
+    throw new ToolInputError(
+      `[${params.toolName}] Missing required parameter 'branch_name'. Provide 'branch_name' directly, or provide 'local_repo_path', or set env WORKFLOW_LOCAL_REPO_PATH to detect current branch automatically.`,
+    );
+  }
+
+  const currentBranch = await runGitInRepo(params.toolName, localRepoPath, [
+    "rev-parse",
+    "--abbrev-ref",
+    "HEAD",
+  ]);
+
+  if (!currentBranch || currentBranch === "HEAD") {
+    throw new ToolInputError(
+      `[${params.toolName}] Failed to resolve a valid current branch from local_repo_path='${localRepoPath}'.`,
+    );
+  }
+
+  return currentBranch.trim();
+}
+
+function buildIssueCommentFromMrChanges(params: {
+  issueIid: number;
+  issueTitle: string;
+  issueDescription?: string;
+  codeProjectId: number;
+  mrIid: number;
+  sourceBranch?: string;
+  targetBranch?: string;
+  changedFiles: string[];
+  includeIssueContext: boolean;
+}): string {
+  const changeLines =
+    params.changedFiles.length > 0
+      ? params.changedFiles.map((filePath) => `- ${filePath}`).join("\n")
+      : "- No changed files detected from merge request changes API.";
+
+  const issueContext = params.includeIssueContext
+    ? (() => {
+        const summarySource = [params.issueTitle, params.issueDescription ?? ""]
+          .map((item) => compactText(item))
+          .filter((item) => item.length > 0)
+          .join(" | ");
+        const summary = clipText(summarySource, 240);
+        return `### Current Issue Context
+- Issue IID: ${params.issueIid}
+- Requirement summary: ${summary}`;
+      })()
+    : "";
+
+  const branchLine = params.sourceBranch ? `\n- Source branch: \`${params.sourceBranch}\`` : "";
+  const targetBranchLine = params.targetBranch ? `\n- Target branch: \`${params.targetBranch}\`` : "";
+
+  return `## Auto Comment Based on MR Changes
+${issueContext ? `\n\n${issueContext}` : ""}
+
+### Change Source
+- Code project ID: ${params.codeProjectId}
+- MR IID: ${params.mrIid}${branchLine}${targetBranchLine}
+
+### Changed Files (from gitlab_get_mr_changes)
+${changeLines}
+
+### Notes
+- This comment was generated automatically from MR changed-file analysis.`;
+}
+
 async function executeAnalyzeAndCreateIssueWorkflow(params: {
   toolName: string;
   requirementText: string;
@@ -1284,10 +1425,10 @@ const commitActionSchema = z.object({
 // TOOL REGISTRATION START
 
 server.registerTool(
-  "workflow_analyze_and_create_issue",
+  "workflow_requirement_to_issue",
   {
     description:
-      "Analyze requirement text and create issue only (without creating code branch).",
+      "Use when requirement text should only create a GitLab issue. This tool does not create branch/commit/MR.",
     outputSchema: workflowAnalyzeAndCreateIssueOutputSchema,
     inputSchema: {
       requirement_text: z.string().min(1).describe("Raw user requirement text."),
@@ -1336,28 +1477,28 @@ server.registerTool(
         .describe("When true, assign issue to current token user if no assignee is provided."),
     },
   },
-  withToolErrorHandling("workflow_analyze_and_create_issue", async (args) => {
+  withToolErrorHandling("workflow_requirement_to_issue", async (args) => {
     const issueProjectId = requireNumberParam(
-      "workflow_analyze_and_create_issue",
+      "workflow_requirement_to_issue",
       "issue_project_id",
       args.issue_project_id,
       config.defaults.issueProjectId,
       "WORKFLOW_ISSUE_PROJECT_ID",
     );
-    enforceIssueProjectLock("workflow_analyze_and_create_issue", issueProjectId);
+    enforceIssueProjectLock("workflow_requirement_to_issue", issueProjectId);
 
     const codeProjectId =
       args.code_project_id ??
       config.defaults.codeProjectId;
     if (codeProjectId !== undefined) {
-      ensurePositiveIntOptional("workflow_analyze_and_create_issue", "code_project_id", codeProjectId);
-      enforceCodeProjectLock("workflow_analyze_and_create_issue", codeProjectId);
+      ensurePositiveIntOptional("workflow_requirement_to_issue", "code_project_id", codeProjectId);
+      enforceCodeProjectLock("workflow_requirement_to_issue", codeProjectId);
     }
 
     const issueProjectPath = optionalStringParam(args.issue_project_path, config.defaults.issueProjectPath);
     const codeProjectPath = optionalStringParam(args.code_project_path, config.defaults.codeProjectPath);
     const result = await executeAnalyzeAndCreateIssueWorkflow({
-      toolName: "workflow_analyze_and_create_issue",
+      toolName: "workflow_requirement_to_issue",
       requirementText: args.requirement_text,
       sourceText: args.source_text,
       expectedBehavior: args.expected_behavior,
@@ -1390,9 +1531,9 @@ server.registerTool(
 );
 
 server.registerTool(
-  "workflow_append_issue_log",
+  "workflow_issue_log_append",
   {
-    description: "Append one issue record to local issue log markdown file.",
+    description: "Use when only local issue log markdown should be appended. This tool does not create MR or commit.",
     outputSchema: workflowAppendIssueLogOutputSchema,
     inputSchema: {
       issue_title: z.string().min(1).describe("Issue title."),
@@ -1421,25 +1562,25 @@ server.registerTool(
         .describe("Issue log path. If omitted, env WORKFLOW_ISSUE_LOG_PATH is used."),
     },
   },
-  withToolErrorHandling("workflow_append_issue_log", async (args) => {
+  withToolErrorHandling("workflow_issue_log_append", async (args) => {
     const issueProjectId = requireNumberParam(
-      "workflow_append_issue_log",
+      "workflow_issue_log_append",
       "issue_project_id",
       args.issue_project_id,
       config.defaults.issueProjectId,
       "WORKFLOW_ISSUE_PROJECT_ID",
     );
     const codeProjectId = requireNumberParam(
-      "workflow_append_issue_log",
+      "workflow_issue_log_append",
       "code_project_id",
       args.code_project_id,
       config.defaults.codeProjectId,
       "WORKFLOW_CODE_PROJECT_ID",
     );
-    enforceProjectLocks("workflow_append_issue_log", issueProjectId, codeProjectId);
+    enforceProjectLocks("workflow_issue_log_append", issueProjectId, codeProjectId);
 
     const logPath = requireStringParam(
-      "workflow_append_issue_log",
+      "workflow_issue_log_append",
       "log_path",
       args.log_path,
       config.defaults.issueLogPath,
@@ -1468,197 +1609,10 @@ server.registerTool(
 );
 
 server.registerTool(
-  "workflow_add_issue_comment",
-  {
-    description: "Add issue comment using direct body or generated completion-comment template.",
-    outputSchema: workflowAddIssueCommentOutputSchema,
-    inputSchema: {
-      issue_project_id: z
-        .number()
-        .int()
-        .positive()
-        .optional()
-        .describe("Issue project ID. If omitted, env WORKFLOW_ISSUE_PROJECT_ID is used."),
-      issue_iid: z.number().int().positive().describe("Issue IID."),
-      body: z
-        .string()
-        .optional()
-        .describe("Direct comment markdown. If provided, generated-comment fields are ignored."),
-      changed_files: z.array(z.string()).optional().describe("Changed file list for generated comment."),
-      branch_name: z.string().optional().describe("Branch name for generated comment."),
-      code_project_path: z.string().optional().describe("Code project path for generated comment."),
-      implementation_summary: z.string().optional().describe("Implementation notes for generated comment."),
-      acceptance_steps: z.string().optional().describe("Validation steps for generated comment."),
-    },
-  },
-  withToolErrorHandling("workflow_add_issue_comment", async (args) => {
-    const issueProjectId = requireNumberParam(
-      "workflow_add_issue_comment",
-      "issue_project_id",
-      args.issue_project_id,
-      config.defaults.issueProjectId,
-      "WORKFLOW_ISSUE_PROJECT_ID",
-    );
-    enforceIssueProjectLock("workflow_add_issue_comment", issueProjectId);
-
-    const codeProjectPath = optionalStringParam(args.code_project_path, config.defaults.codeProjectPath);
-    const body = (() => {
-      if (args.body) {
-        return args.body;
-      }
-      if (!args.branch_name) {
-        missingParam("workflow_add_issue_comment", "branch_name");
-      }
-      if (!args.implementation_summary) {
-        missingParam("workflow_add_issue_comment", "implementation_summary");
-      }
-      if (!args.acceptance_steps) {
-        missingParam("workflow_add_issue_comment", "acceptance_steps");
-      }
-      return renderIssueCompletionComment({
-        changedFiles: args.changed_files ?? [],
-        branchName: args.branch_name,
-        codeProjectPath,
-        implementationSummary: args.implementation_summary,
-        acceptanceSteps: args.acceptance_steps,
-      });
-    })();
-
-    const note = await gitlab.createIssueNote(issueProjectId, args.issue_iid, body);
-    return {
-      issue_iid: args.issue_iid,
-      note_id: note.id,
-      body,
-      web_url: note?.noteable_url ?? null,
-    };
-  }),
-);
-
-server.registerTool(
-  "workflow_create_merge_request",
+  "workflow_review_mr_post_comment",
   {
     description:
-      "Create merge request and optionally update local issue log status. No hardcoded project or branch values.",
-    outputSchema: workflowCreateMergeRequestOutputSchema,
-    inputSchema: {
-      issue_project_id: z
-        .number()
-        .int()
-        .positive()
-        .optional()
-        .describe("Issue project ID. If omitted, env WORKFLOW_ISSUE_PROJECT_ID is used."),
-      issue_project_path: z.string().optional().describe("Issue project path."),
-      issue_iid: z.number().int().positive().describe("Issue IID."),
-      code_project_id: z
-        .number()
-        .int()
-        .positive()
-        .optional()
-        .describe("Code project ID. If omitted, env WORKFLOW_CODE_PROJECT_ID is used."),
-      branch_name: z.string().min(1).describe("Source branch name."),
-      target_branch: z
-        .string()
-        .optional()
-        .describe("Target branch. If omitted, env WORKFLOW_TARGET_BRANCH is used."),
-      change_summary: z.string().min(1).describe("MR change summary section."),
-      test_plan: z.string().min(1).describe("MR test plan section."),
-      merge_request_title: z.string().optional().describe("Optional MR title override."),
-      work_type: z.enum(["feat", "fix", "chore"]).optional().describe("Optional work type override."),
-      summary: z.string().optional().describe("Optional short summary used for title."),
-      label: z.string().optional().describe("Optional MR label."),
-      assignee_username: z.string().optional().describe("Optional assignee username."),
-      remove_source_branch: z.boolean().optional().describe("Pass-through to GitLab MR API."),
-      squash: z.boolean().optional().describe("Pass-through to GitLab MR API."),
-      draft: z.boolean().optional().describe("Create MR as draft."),
-      update_log: z.boolean().optional().describe("Whether to update local issue log."),
-      log_path: z.string().optional().describe("Issue log path."),
-      log_status: z.string().optional().describe("Status text written into issue log."),
-    },
-  },
-  withToolErrorHandling("workflow_create_merge_request", async (args) => {
-    const issueProjectId = requireNumberParam(
-      "workflow_create_merge_request",
-      "issue_project_id",
-      args.issue_project_id,
-      config.defaults.issueProjectId,
-      "WORKFLOW_ISSUE_PROJECT_ID",
-    );
-    const codeProjectId = requireNumberParam(
-      "workflow_create_merge_request",
-      "code_project_id",
-      args.code_project_id,
-      config.defaults.codeProjectId,
-      "WORKFLOW_CODE_PROJECT_ID",
-    );
-    enforceProjectLocks("workflow_create_merge_request", issueProjectId, codeProjectId);
-
-    const targetBranch = requireStringParam(
-      "workflow_create_merge_request",
-      "target_branch",
-      args.target_branch,
-      config.defaults.targetBranch,
-      "WORKFLOW_TARGET_BRANCH",
-    );
-    const issueProjectPath = optionalStringParam(args.issue_project_path, config.defaults.issueProjectPath);
-    const label = optionalStringParam(args.label, config.defaults.label);
-    const assigneeUsername = optionalStringParam(args.assignee_username, config.defaults.assigneeUsername);
-
-    const mr = await createWorkflowMergeRequest({
-      issueProjectId,
-      issueProjectPath,
-      issueIid: args.issue_iid,
-      codeProjectId,
-      sourceBranch: args.branch_name,
-      targetBranch,
-      mergeRequestTitle: args.merge_request_title,
-      workType: args.work_type,
-      summary: args.summary,
-      changeSummary: args.change_summary,
-      testPlan: args.test_plan,
-      label,
-      assigneeUsername,
-      removeSourceBranch: args.remove_source_branch,
-      squash: args.squash,
-      draft: args.draft,
-    });
-
-    let log: { updated: boolean; path?: string } = { updated: false };
-    if (args.update_log) {
-      const logPath = requireStringParam(
-        "workflow_create_merge_request",
-        "log_path",
-        args.log_path,
-        config.defaults.issueLogPath,
-        "WORKFLOW_ISSUE_LOG_PATH",
-      );
-      const logStatus = args.log_status ?? "mr_pending_review";
-      const path = await updateIssueLogWithMr({
-        logPath,
-        issueIid: args.issue_iid,
-        mrIid: mr.iid,
-        mrUrl: mr.web_url,
-        status: logStatus,
-      });
-      log = { updated: true, path };
-    }
-
-    return {
-      merge_request: {
-        id: mr.id,
-        iid: mr.iid,
-        title: typeof mr.title === "string" ? mr.title : String(mr.title ?? ""),
-        web_url: typeof mr.web_url === "string" ? mr.web_url : "",
-      },
-      log,
-    };
-  }),
-);
-
-server.registerTool(
-  "workflow_review_mr_and_comment",
-  {
-    description:
-      "Review merge request metadata/changes and create a review comment, optionally approving it.",
+      "Use when an existing MR should be reviewed and a review comment should be posted (optional approval).",
     outputSchema: workflowReviewMrAndCommentOutputSchema,
     inputSchema: {
       code_project_id: z
@@ -1694,15 +1648,15 @@ server.registerTool(
         .describe("Optional expected MR HEAD SHA when approve=true."),
     },
   },
-  withToolErrorHandling("workflow_review_mr_and_comment", async (args) => {
+  withToolErrorHandling("workflow_review_mr_post_comment", async (args) => {
     const codeProjectId = requireNumberParam(
-      "workflow_review_mr_and_comment",
+      "workflow_review_mr_post_comment",
       "code_project_id",
       args.code_project_id,
       config.defaults.codeProjectId,
       "WORKFLOW_CODE_PROJECT_ID",
     );
-    enforceCodeProjectLock("workflow_review_mr_and_comment", codeProjectId);
+    enforceCodeProjectLock("workflow_review_mr_post_comment", codeProjectId);
 
     const mr = await gitlab.getMergeRequest(codeProjectId, args.mr_iid);
     const includeChanges = args.include_changes ?? true;
@@ -1771,10 +1725,10 @@ server.registerTool(
 );
 
 server.registerTool(
-  "workflow_local_sync_checkout_branch",
+  "workflow_sync_local_branch",
   {
     description:
-      "Fetch remote changes, optionally sync base branch, then checkout/switch to target branch in local repo.",
+      "Use when local repository should fetch/pull and switch to a target branch. Local git operations only.",
     outputSchema: workflowLocalSyncCheckoutBranchOutputSchema,
     inputSchema: {
       branch_name: z.string().min(1).describe("Target branch to checkout locally."),
@@ -1792,16 +1746,16 @@ server.registerTool(
         .describe("Optional base branch to pull before checkout. If omitted, env WORKFLOW_BASE_BRANCH is used."),
     },
   },
-  withToolErrorHandling("workflow_local_sync_checkout_branch", async (args) => {
+  withToolErrorHandling("workflow_sync_local_branch", async (args) => {
     const repoPath = requireStringParam(
-      "workflow_local_sync_checkout_branch",
+      "workflow_sync_local_branch",
       "repo_path",
       args.repo_path,
       config.defaults.localRepoPath,
       "WORKFLOW_LOCAL_REPO_PATH",
     );
     const remoteName = requireStringParam(
-      "workflow_local_sync_checkout_branch",
+      "workflow_sync_local_branch",
       "remote_name",
       args.remote_name,
       config.defaults.localGitRemoteName,
@@ -1809,7 +1763,7 @@ server.registerTool(
     );
     const baseBranch = optionalStringParam(args.base_branch, config.defaults.baseBranch);
     return syncAndCheckoutLocalBranch({
-      toolName: "workflow_local_sync_checkout_branch",
+      toolName: "workflow_sync_local_branch",
       repoPath,
       remoteName,
       branchName: args.branch_name.trim(),
@@ -1819,10 +1773,10 @@ server.registerTool(
 );
 
 server.registerTool(
-  "workflow_issue_to_mr_full",
+  "workflow_issue_to_delivery",
   {
     description:
-      "Read existing issue, create branch, commit changes, create MR, review/comment MR, sync local branch, comment issue, and update issue log.",
+      "Use when an existing issue_iid should be delivered end-to-end: branch, commit, MR, MR review comment, issue comment, local sync, and issue log.",
     outputSchema: workflowIssueToMrFullOutputSchema,
     inputSchema: {
       issue_project_id: z
@@ -1902,32 +1856,32 @@ server.registerTool(
       log_status: z.string().optional().describe("Issue log status text."),
     },
   },
-  withToolErrorHandling("workflow_issue_to_mr_full", async (args) => {
+  withToolErrorHandling("workflow_issue_to_delivery", async (args) => {
     const issueProjectId = requireNumberParam(
-      "workflow_issue_to_mr_full",
+      "workflow_issue_to_delivery",
       "issue_project_id",
       args.issue_project_id,
       config.defaults.issueProjectId,
       "WORKFLOW_ISSUE_PROJECT_ID",
     );
     const codeProjectId = requireNumberParam(
-      "workflow_issue_to_mr_full",
+      "workflow_issue_to_delivery",
       "code_project_id",
       args.code_project_id,
       config.defaults.codeProjectId,
       "WORKFLOW_CODE_PROJECT_ID",
     );
-    enforceProjectLocks("workflow_issue_to_mr_full", issueProjectId, codeProjectId);
+    enforceProjectLocks("workflow_issue_to_delivery", issueProjectId, codeProjectId);
 
     const baseBranch = requireStringParam(
-      "workflow_issue_to_mr_full",
+      "workflow_issue_to_delivery",
       "base_branch",
       args.base_branch,
       config.defaults.baseBranch,
       "WORKFLOW_BASE_BRANCH",
     );
     const targetBranch = requireStringParam(
-      "workflow_issue_to_mr_full",
+      "workflow_issue_to_delivery",
       "target_branch",
       args.target_branch,
       config.defaults.targetBranch,
@@ -1935,7 +1889,7 @@ server.registerTool(
     );
 
     if (!args.commit_actions) {
-      missingParam("workflow_issue_to_mr_full", "commit_actions");
+      missingParam("workflow_issue_to_delivery", "commit_actions");
     }
     const commitActions: CommitActionInput[] = args.commit_actions.map((action) => ({
       action: action.action,
@@ -1948,7 +1902,7 @@ server.registerTool(
     }));
 
     return executeIssueToMrFullWorkflow({
-      toolName: "workflow_issue_to_mr_full",
+      toolName: "workflow_issue_to_delivery",
       issueProjectId,
       issueProjectPath: optionalStringParam(args.issue_project_path, config.defaults.issueProjectPath),
       issueIid: args.issue_iid,
@@ -1986,10 +1940,10 @@ server.registerTool(
 );
 
 server.registerTool(
-  "workflow_requirement_to_delivery_full",
+  "workflow_requirement_to_delivery",
   {
     description:
-      "End-to-end chain: analyze requirement, create issue, then deliver from issue to MR with review/comment/local checkout/log.",
+      "Use when requirement text should run full chain: create issue first, then execute issue-to-delivery workflow.",
     outputSchema: workflowRequirementToDeliveryFullOutputSchema,
     inputSchema: {
       requirement_text: z.string().min(1).describe("Raw user requirement text."),
@@ -2087,28 +2041,28 @@ server.registerTool(
       log_status: z.string().optional().describe("Issue log status text."),
     },
   },
-  withToolErrorHandling("workflow_requirement_to_delivery_full", async (args) => {
+  withToolErrorHandling("workflow_requirement_to_delivery", async (args) => {
     const issueProjectId = requireNumberParam(
-      "workflow_requirement_to_delivery_full",
+      "workflow_requirement_to_delivery",
       "issue_project_id",
       args.issue_project_id,
       config.defaults.issueProjectId,
       "WORKFLOW_ISSUE_PROJECT_ID",
     );
     const codeProjectId = requireNumberParam(
-      "workflow_requirement_to_delivery_full",
+      "workflow_requirement_to_delivery",
       "code_project_id",
       args.code_project_id,
       config.defaults.codeProjectId,
       "WORKFLOW_CODE_PROJECT_ID",
     );
-    enforceProjectLocks("workflow_requirement_to_delivery_full", issueProjectId, codeProjectId);
+    enforceProjectLocks("workflow_requirement_to_delivery", issueProjectId, codeProjectId);
 
     const issueProjectPath = optionalStringParam(args.issue_project_path, config.defaults.issueProjectPath);
     const codeProjectPath = optionalStringParam(args.code_project_path, config.defaults.codeProjectPath);
 
     const created = await executeAnalyzeAndCreateIssueWorkflow({
-      toolName: "workflow_requirement_to_delivery_full",
+      toolName: "workflow_requirement_to_delivery",
       requirementText: args.requirement_text,
       sourceText: args.source_text,
       expectedBehavior: args.expected_behavior,
@@ -2134,14 +2088,14 @@ server.registerTool(
     });
 
     const baseBranch = requireStringParam(
-      "workflow_requirement_to_delivery_full",
+      "workflow_requirement_to_delivery",
       "base_branch",
       args.base_branch,
       config.defaults.baseBranch,
       "WORKFLOW_BASE_BRANCH",
     );
     const targetBranch = requireStringParam(
-      "workflow_requirement_to_delivery_full",
+      "workflow_requirement_to_delivery",
       "target_branch",
       args.target_branch,
       config.defaults.targetBranch,
@@ -2149,7 +2103,7 @@ server.registerTool(
     );
 
     if (!args.commit_actions) {
-      missingParam("workflow_requirement_to_delivery_full", "commit_actions");
+      missingParam("workflow_requirement_to_delivery", "commit_actions");
     }
     const commitActions: CommitActionInput[] = args.commit_actions.map((action) => ({
       action: action.action,
@@ -2162,7 +2116,7 @@ server.registerTool(
     }));
 
     const delivery = await executeIssueToMrFullWorkflow({
-      toolName: "workflow_requirement_to_delivery_full",
+      toolName: "workflow_requirement_to_delivery",
       issueProjectId,
       issueProjectPath,
       issueIid: created.issue.iid,
@@ -2640,20 +2594,182 @@ server.registerTool(
 server.registerTool(
   "gitlab_add_issue_comment",
   {
-    description: "Create issue note/comment by GitLab REST API.",
+    description:
+      "Create issue note/comment. Supports direct body or auto-generation from MR changed files (by MR IID or source branch).",
     outputSchema: gitlabAddIssueCommentOutputSchema,
     inputSchema: {
       project_id: z.number().int().positive().optional().describe("GitLab project ID."),
       issue_iid: z.number().int().positive().optional().describe("Issue IID."),
-      body: z.string().optional().describe("Comment markdown body."),
+      body: z
+        .string()
+        .optional()
+        .describe("Comment markdown body. If provided, auto-generation fields are ignored."),
+      auto_generate_from_mr_changes: z
+        .boolean()
+        .optional()
+        .describe("When true and body is missing, generate comment from MR changed-file analysis."),
+      code_project_id: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Code project ID used for MR lookup/changes when auto_generate_from_mr_changes=true."),
+      mr_iid: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Optional MR IID for changed-file analysis."),
+      branch_name: z
+        .string()
+        .optional()
+        .describe("Optional source branch for MR lookup when mr_iid is not provided."),
+      target_branch: z
+        .string()
+        .optional()
+        .describe("Optional target branch filter while resolving MR by branch_name."),
+      local_repo_path: z
+        .string()
+        .optional()
+        .describe("Optional local repo path used to detect current branch when branch_name is missing."),
+      include_issue_context: z
+        .boolean()
+        .optional()
+        .describe("Whether generated comment includes compact issue requirement context. Default true."),
+      max_changed_files: z
+        .number()
+        .int()
+        .positive()
+        .max(100)
+        .optional()
+        .describe("Maximum number of changed files included in generated comment. Default 30."),
     },
   },
   withToolErrorHandling("gitlab_add_issue_comment", async (args) => {
     const projectId = requireNumberParam("gitlab_add_issue_comment", "project_id", args.project_id, undefined);
     const issueIid = requireNumberParam("gitlab_add_issue_comment", "issue_iid", args.issue_iid, undefined);
-    const body = requireStringParam("gitlab_add_issue_comment", "body", args.body, undefined);
     enforceIssueProjectLock("gitlab_add_issue_comment", projectId);
-    return gitlab.createIssueNote(projectId, issueIid, body);
+
+    let body = args.body?.trim();
+    const autoGenerate = args.auto_generate_from_mr_changes ?? false;
+    let generatedFromMr:
+      | {
+          code_project_id: number;
+          mr_iid: number;
+          source_branch?: string;
+          target_branch?: string;
+          changed_files: string[];
+        }
+      | undefined;
+
+    if (!body && autoGenerate) {
+      const codeProjectId = requireNumberParam(
+        "gitlab_add_issue_comment",
+        "code_project_id",
+        args.code_project_id,
+        config.defaults.codeProjectId,
+        "WORKFLOW_CODE_PROJECT_ID",
+      );
+      enforceCodeProjectLock("gitlab_add_issue_comment", codeProjectId);
+
+      const issue = await gitlab.getIssue(projectId, issueIid);
+      const includeIssueContext = args.include_issue_context ?? true;
+      const maxChangedFiles =
+        ensurePositiveIntRangeOptional(
+          "gitlab_add_issue_comment",
+          "max_changed_files",
+          args.max_changed_files,
+          100,
+        ) ?? 30;
+
+      let mrIid = ensurePositiveIntOptional("gitlab_add_issue_comment", "mr_iid", args.mr_iid);
+      let sourceBranch = args.branch_name?.trim();
+
+      if (!mrIid) {
+        sourceBranch = await resolveBranchNameForAutoIssueComment({
+          toolName: "gitlab_add_issue_comment",
+          branchName: args.branch_name,
+          localRepoPath: args.local_repo_path,
+        });
+
+        const mergeRequests = await gitlab.listMergeRequests(codeProjectId, {
+          state: "opened",
+          sourceBranch,
+          targetBranch: args.target_branch?.trim(),
+          orderBy: "updated_at",
+          sort: "desc",
+          page: 1,
+          perPage: 20,
+        });
+
+        const matchedMr = (mergeRequests as any[]).find(
+          (item) => Number.isInteger(item?.iid) && item.iid > 0,
+        );
+        if (!matchedMr) {
+          throw new ToolInputError(
+            `[gitlab_add_issue_comment] No opened merge request found in code_project_id=${codeProjectId} for source branch '${sourceBranch}'. Provide 'mr_iid' explicitly or verify branch/target_branch.`,
+          );
+        }
+        mrIid = matchedMr.iid;
+        if (typeof matchedMr?.source_branch === "string" && matchedMr.source_branch.trim()) {
+          sourceBranch = matchedMr.source_branch.trim();
+        }
+      }
+
+      const resolvedMrIid = mrIid;
+      if (!resolvedMrIid) {
+        throw new ToolInputError(
+          "[gitlab_add_issue_comment] Failed to resolve merge request for auto-generated comment.",
+        );
+      }
+
+      const mrChanges = await gitlab.getMergeRequestChanges(codeProjectId, resolvedMrIid);
+      if (!sourceBranch && typeof mrChanges?.source_branch === "string") {
+        sourceBranch = mrChanges.source_branch.trim();
+      }
+      const targetBranch =
+        args.target_branch?.trim() ||
+        (typeof mrChanges?.target_branch === "string" ? mrChanges.target_branch.trim() : undefined);
+      const changedFiles = extractChangedFilePaths(mrChanges, maxChangedFiles);
+
+      body = buildIssueCommentFromMrChanges({
+        issueIid,
+        issueTitle:
+          typeof issue?.title === "string" && issue.title.trim()
+            ? issue.title.trim()
+            : `Issue ${issueIid}`,
+        issueDescription: typeof issue?.description === "string" ? issue.description : undefined,
+        codeProjectId,
+        mrIid: resolvedMrIid,
+        sourceBranch,
+        targetBranch,
+        changedFiles,
+        includeIssueContext,
+      });
+
+      generatedFromMr = {
+        code_project_id: codeProjectId,
+        mr_iid: resolvedMrIid,
+        source_branch: sourceBranch,
+        target_branch: targetBranch,
+        changed_files: changedFiles,
+      };
+    }
+
+    if (!body) {
+      throw new ToolInputError(
+        "[gitlab_add_issue_comment] Missing required parameter 'body'. Provide 'body', or set auto_generate_from_mr_changes=true with code_project_id plus mr_iid or branch_name (or local_repo_path).",
+      );
+    }
+
+    const note = await gitlab.createIssueNote(projectId, issueIid, body);
+    if (!generatedFromMr) {
+      return note;
+    }
+    return {
+      ...note,
+      generated_from_mr_changes: generatedFromMr,
+    };
   }),
 );
 
@@ -2761,6 +2877,22 @@ server.registerTool(
       target_branch: z.string().optional().describe("Target branch."),
       title: z.string().optional().describe("Merge request title."),
       description: z.string().optional().describe("Merge request description."),
+      issue_project_id: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Optional issue project ID used to render related issue reference in MR description."),
+      issue_project_path: z
+        .string()
+        .optional()
+        .describe("Optional issue project path used to render related issue reference."),
+      issue_iid: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Optional related issue IID. If provided, MR description will include related issue section."),
       labels: z.array(z.string()).optional().describe("Labels array."),
       assignee_ids: z.array(z.number().int().positive()).optional().describe("Assignee user IDs."),
       reviewer_ids: z.array(z.number().int().positive()).optional().describe("Reviewer user IDs."),
@@ -2789,13 +2921,42 @@ server.registerTool(
       undefined,
     );
     const title = requireStringParam("gitlab_create_merge_request", "title", args.title, undefined);
+    const issueProjectId = ensurePositiveIntOptional(
+      "gitlab_create_merge_request",
+      "issue_project_id",
+      args.issue_project_id,
+    );
+    const issueProjectPath = args.issue_project_path?.trim() || undefined;
+    const issueIid = ensurePositiveIntOptional("gitlab_create_merge_request", "issue_iid", args.issue_iid);
+
+    if ((issueProjectId !== undefined || issueProjectPath) && issueIid === undefined) {
+      missingParam("gitlab_create_merge_request", "issue_iid");
+    }
+    if (issueIid !== undefined && issueProjectId === undefined && !issueProjectPath) {
+      invalidParam(
+        "gitlab_create_merge_request",
+        "issue_iid",
+        "requires issue_project_id or issue_project_path to build issue reference",
+      );
+    }
+    if (issueProjectId !== undefined) {
+      enforceAnyLockedProject("gitlab_create_merge_request", issueProjectId);
+    }
+
+    const mergedDescription = withIssueReferenceInMrDescription({
+      description: args.description,
+      issueIid,
+      issueProjectId,
+      issueProjectPath,
+    });
+
     enforceCodeProjectLock("gitlab_create_merge_request", projectId);
     return gitlab.createMergeRequest({
       projectId,
       sourceBranch,
       targetBranch,
       title,
-      description: args.description,
+      description: mergedDescription,
       labels: normalizeStringArray(args.labels),
       assigneeIds: normalizePositiveIntArray(
         "gitlab_create_merge_request",

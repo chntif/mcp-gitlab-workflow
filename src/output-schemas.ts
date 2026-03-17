@@ -51,18 +51,6 @@ const mergeRequestBriefSchema = z.object({
 
 const workflowAppendIssueLogDataSchema = logUpdateSchema;
 
-const workflowAddIssueCommentDataSchema = z.object({
-  issue_iid: z.number().describe("Target issue IID."),
-  note_id: z.number().describe("Created note ID."),
-  body: z.string().describe("Comment markdown body."),
-  web_url: z.string().nullable().describe("Issue/note web URL when available."),
-});
-
-const workflowCreateMergeRequestDataSchema = z.object({
-  merge_request: mergeRequestBriefSchema.describe("Created merge request metadata."),
-  log: logUpdateSchema.describe("Issue log update result."),
-});
-
 const workflowAnalyzeAndCreateIssueDataSchema = z.object({
   parsed: workflowParseRequirementDataSchema.describe("Parsed requirement metadata."),
   issue: issueBriefSchema.describe("Created issue metadata."),
@@ -293,17 +281,29 @@ const gitlabIssueImagesSchema = z.object({
   images: z.array(issueImageItemSchema).describe("Parsed image references."),
 });
 
+const gitlabAddIssueCommentDataSchema = z
+  .object({
+    id: z.number().describe("Note ID."),
+    body: z.unknown().optional().describe("Note markdown body."),
+    created_at: z.unknown().optional().describe("Creation timestamp."),
+    updated_at: z.unknown().optional().describe("Update timestamp."),
+    system: z.unknown().optional().describe("Whether note is system-generated."),
+    generated_from_mr_changes: z
+      .object({
+        code_project_id: z.number().describe("Code project ID used for MR changes analysis."),
+        mr_iid: z.number().describe("Merge request IID used for analysis."),
+        source_branch: z.string().optional().describe("Resolved source branch."),
+        target_branch: z.string().optional().describe("Resolved target branch."),
+        changed_files: z.array(z.string()).describe("Changed files included in generated comment."),
+      })
+      .optional()
+      .describe("Auto-generation metadata when comment body is derived from MR changes."),
+  })
+  .passthrough();
+
 export const workflowAppendIssueLogOutputSchema = createToolOutputSchema(
   workflowAppendIssueLogDataSchema,
   "Issue log append result.",
-);
-export const workflowAddIssueCommentOutputSchema = createToolOutputSchema(
-  workflowAddIssueCommentDataSchema,
-  "Issue comment creation result.",
-);
-export const workflowCreateMergeRequestOutputSchema = createToolOutputSchema(
-  workflowCreateMergeRequestDataSchema,
-  "Workflow merge request creation result.",
 );
 export const workflowAnalyzeAndCreateIssueOutputSchema = createToolOutputSchema(
   workflowAnalyzeAndCreateIssueDataSchema,
@@ -339,7 +339,7 @@ export const gitlabGetIssueNotesOutputSchema = createToolOutputSchema(
   "GitLab issue notes list.",
 );
 export const gitlabAddIssueCommentOutputSchema = createToolOutputSchema(
-  gitlabNoteSchema,
+  gitlabAddIssueCommentDataSchema,
   "Created GitLab issue note payload.",
 );
 export const gitlabCreateBranchOutputSchema = createToolOutputSchema(
