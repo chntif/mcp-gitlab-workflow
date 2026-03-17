@@ -46,14 +46,12 @@ import {
   workflowAddIssueCommentOutputSchema,
   workflowAnalyzeAndCreateIssueOutputSchema,
   workflowAppendIssueLogOutputSchema,
-  workflowCompleteOutputSchema,
   workflowCreateMergeRequestOutputSchema,
   workflowIssueToMrFullOutputSchema,
   workflowLocalSyncCheckoutBranchOutputSchema,
   workflowParseRequirementOutputSchema,
   workflowRequirementToDeliveryFullOutputSchema,
   workflowReviewMrAndCommentOutputSchema,
-  workflowStartOutputSchema,
 } from "./output-schemas.js";
 
 const config = getRuntimeConfig();
@@ -1438,21 +1436,6 @@ server.registerTool(
 );
 
 server.registerTool(
-  "workflow_start",
-  {
-    description:
-      "[DEPRECATED] Use workflow_analyze_and_create_issue + workflow_issue_to_mr_full or workflow_requirement_to_delivery_full.",
-    outputSchema: workflowStartOutputSchema,
-    inputSchema: {},
-  },
-  withToolErrorHandling("workflow_start", async () => {
-    throw new ToolInputError(
-      "[workflow_start] Deprecated. Use workflow_analyze_and_create_issue + workflow_issue_to_mr_full, or workflow_requirement_to_delivery_full.",
-    );
-  }),
-);
-
-server.registerTool(
   "workflow_append_issue_log",
   {
     description: "Append one issue record to local issue log markdown file.",
@@ -1714,21 +1697,6 @@ server.registerTool(
       },
       log,
     };
-  }),
-);
-
-server.registerTool(
-  "workflow_complete",
-  {
-    description:
-      "[DEPRECATED] Use workflow_issue_to_mr_full for issue-driven delivery, or workflow_requirement_to_delivery_full for requirement-to-delivery.",
-    outputSchema: workflowCompleteOutputSchema,
-    inputSchema: {},
-  },
-  withToolErrorHandling("workflow_complete", async () => {
-    throw new ToolInputError(
-      "[workflow_complete] Deprecated. Use workflow_issue_to_mr_full for issue-driven delivery, or workflow_requirement_to_delivery_full for requirement-to-delivery.",
-    );
   }),
 );
 

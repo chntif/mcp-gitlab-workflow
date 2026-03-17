@@ -49,13 +49,6 @@ const mergeRequestBriefSchema = z.object({
   web_url: z.string().describe("Merge request web URL."),
 });
 
-const workflowStartDataSchema = z.object({
-  parsed: workflowParseRequirementDataSchema.describe("Parsed requirement metadata."),
-  issue: issueBriefSchema.describe("Created issue metadata."),
-  branch: branchBriefSchema.describe("Created branch metadata."),
-  log: logUpdateSchema.describe("Issue log update result."),
-});
-
 const workflowAppendIssueLogDataSchema = logUpdateSchema;
 
 const workflowAddIssueCommentDataSchema = z.object({
@@ -66,16 +59,6 @@ const workflowAddIssueCommentDataSchema = z.object({
 });
 
 const workflowCreateMergeRequestDataSchema = z.object({
-  merge_request: mergeRequestBriefSchema.describe("Created merge request metadata."),
-  log: logUpdateSchema.describe("Issue log update result."),
-});
-
-const workflowCompleteDataSchema = z.object({
-  issue_comment: z
-    .object({
-      note_id: z.number().describe("Created issue note ID."),
-    })
-    .describe("Issue comment result."),
   merge_request: mergeRequestBriefSchema.describe("Created merge request metadata."),
   log: logUpdateSchema.describe("Issue log update result."),
 });
@@ -314,10 +297,6 @@ export const workflowParseRequirementOutputSchema = createToolOutputSchema(
   workflowParseRequirementDataSchema,
   "Parsed requirement result.",
 );
-export const workflowStartOutputSchema = createToolOutputSchema(
-  workflowStartDataSchema,
-  "Workflow start result including issue and branch metadata.",
-);
 export const workflowAppendIssueLogOutputSchema = createToolOutputSchema(
   workflowAppendIssueLogDataSchema,
   "Issue log append result.",
@@ -329,10 +308,6 @@ export const workflowAddIssueCommentOutputSchema = createToolOutputSchema(
 export const workflowCreateMergeRequestOutputSchema = createToolOutputSchema(
   workflowCreateMergeRequestDataSchema,
   "Workflow merge request creation result.",
-);
-export const workflowCompleteOutputSchema = createToolOutputSchema(
-  workflowCompleteDataSchema,
-  "Workflow completion result.",
 );
 export const workflowAnalyzeAndCreateIssueOutputSchema = createToolOutputSchema(
   workflowAnalyzeAndCreateIssueDataSchema,
