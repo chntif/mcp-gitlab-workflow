@@ -25,14 +25,23 @@ import {
   gitlabApproveMrOutputSchema,
   gitlabCommitFilesOutputSchema,
   gitlabCreateBranchOutputSchema,
+  gitlabCreateLabelOutputSchema,
   gitlabCreateIssueOutputSchema,
   gitlabCreateMergeRequestOutputSchema,
   gitlabCreateMrNoteOutputSchema,
+  gitlabDeleteLabelOutputSchema,
   gitlabGetFileOutputSchema,
+  gitlabGetCurrentUserOutputSchema,
+  gitlabGetIssueImagesOutputSchema,
   gitlabGetIssueNotesOutputSchema,
   gitlabGetIssueOutputSchema,
+  gitlabGetMergeRequestOutputSchema,
   gitlabGetMrChangesOutputSchema,
+  gitlabGetMrNotesOutputSchema,
+  gitlabListLabelsOutputSchema,
+  gitlabUpdateLabelOutputSchema,
   gitlabUnapproveMrOutputSchema,
+  gitlabUploadProjectFileOutputSchema,
   workflowAddIssueCommentOutputSchema,
   workflowAppendIssueLogOutputSchema,
   workflowCompleteOutputSchema,
@@ -49,7 +58,7 @@ const gitlab = new GitLabClient({
 
 const server = new McpServer({
   name: "mcp-gitlab-workflow",
-  version: "1.2.0",
+  version: "1.3.0",
 });
 
 class ToolInputError extends Error {
@@ -157,6 +166,14 @@ function normalizeStringArray(values: string[] | undefined): string[] | undefine
   return normalized.length > 0 ? normalized : undefined;
 }
 
+function normalizeUniqueStringArray(values: string[] | undefined): string[] | undefined {
+  const normalized = normalizeStringArray(values);
+  if (!normalized) {
+    return undefined;
+  }
+  return [...new Set(normalized)];
+}
+
 function normalizePositiveIntArray(
   toolName: string,
   fieldName: string,
@@ -198,6 +215,21 @@ function enforceCodeProjectLock(toolName: string, codeProjectId: number) {
 function enforceProjectLocks(toolName: string, issueProjectId: number, codeProjectId: number) {
   enforceIssueProjectLock(toolName, issueProjectId);
   enforceCodeProjectLock(toolName, codeProjectId);
+}
+
+function enforceAnyLockedProject(toolName: string, projectId: number) {
+  const allowedProjectIds = [config.locks.issueProjectId, config.locks.codeProjectId].filter(
+    (value): value is number => value !== undefined,
+  );
+  if (allowedProjectIds.length === 0) {
+    return;
+  }
+  if (allowedProjectIds.includes(projectId)) {
+    return;
+  }
+  throw new ToolInputError(
+    `[${toolName}] project_id=${projectId} does not match any locked project id (${allowedProjectIds.join(", ")}).`,
+  );
 }
 
 function toErrorPayload(toolName: string, error: unknown) {
@@ -326,6 +358,60 @@ async function resolveAssigneeIdsFromUsername(username: string | undefined): Pro
   return [id];
 }
 
+async function resolveAssigneeIdsFromUsernames(
+  toolName: string,
+  usernames: string[] | undefined,
+): Promise<number[] | undefined> {
+  const normalized = normalizeUniqueStringArray(usernames);
+  if (!normalized || normalized.length === 0) {
+    return undefined;
+  }
+
+  const userIds: number[] = [];
+  for (const username of normalized) {
+    const id = await gitlab.findUserIdByUsername(username);
+    if (!id) {
+      throw new ToolInputError(`[${toolName}] assignee username '${username}' was not found in GitLab.`);
+    }
+    userIds.push(id);
+  }
+
+  return [...new Set(userIds)];
+}
+
+async function resolveIssueAssigneeIds(toolName: string, params: {
+  assigneeIds?: number[];
+  assigneeUsernames?: string[];
+  assigneeUsername?: string;
+  assignToCurrentUserIfMissing?: boolean;
+}): Promise<number[] | undefined> {
+  const assigneeIds = normalizePositiveIntArray(toolName, "assignee_ids", params.assigneeIds);
+  if (assigneeIds && assigneeIds.length > 0) {
+    return assigneeIds;
+  }
+
+  const usernameCandidates = normalizeUniqueStringArray([
+    ...(params.assigneeUsernames ?? []),
+    ...(params.assigneeUsername ? [params.assigneeUsername] : []),
+  ]);
+  const usernameResolvedIds = await resolveAssigneeIdsFromUsernames(toolName, usernameCandidates);
+  if (usernameResolvedIds && usernameResolvedIds.length > 0) {
+    return usernameResolvedIds;
+  }
+
+  if (params.assignToCurrentUserIfMissing) {
+    const currentUser = await gitlab.getCurrentUser();
+    if (!currentUser || !Number.isInteger(currentUser.id) || currentUser.id <= 0) {
+      throw new ToolInputError(
+        `[${toolName}] Failed to resolve current authenticated GitLab user id for default assignee.`,
+      );
+    }
+    return [currentUser.id];
+  }
+
+  return undefined;
+}
+
 function ensureIsoDate(toolName: string, fieldName: string, value: string | undefined): string | undefined {
   if (!value) {
     return undefined;
@@ -335,6 +421,86 @@ function ensureIsoDate(toolName: string, fieldName: string, value: string | unde
     invalidParam(toolName, fieldName, "must be in YYYY-MM-DD format");
   }
   return trimmed;
+}
+
+function ensureHexColor(toolName: string, fieldName: string, value: string): string {
+  const normalized = value.trim();
+  if (!/^#(?:[0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(normalized)) {
+    return invalidParam(toolName, fieldName, "must be a valid hex color like #FF8800");
+  }
+  return normalized;
+}
+
+function ensurePositiveIntOptional(
+  toolName: string,
+  fieldName: string,
+  value: number | undefined,
+): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Number.isInteger(value) || value <= 0) {
+    return invalidParam(toolName, fieldName, "must be a positive integer");
+  }
+  return value;
+}
+
+function ensurePositiveIntRangeOptional(
+  toolName: string,
+  fieldName: string,
+  value: number | undefined,
+  max: number,
+): number | undefined {
+  const parsed = ensurePositiveIntOptional(toolName, fieldName, value);
+  if (parsed === undefined) {
+    return undefined;
+  }
+  if (parsed > max) {
+    return invalidParam(toolName, fieldName, `must be <= ${max}`);
+  }
+  return parsed;
+}
+
+type ParsedImageRef = {
+  altText?: string;
+  rawUrl: string;
+  markdownFragment: string;
+};
+
+function extractImageReferences(markdownOrHtml: string): ParsedImageRef[] {
+  const results: ParsedImageRef[] = [];
+  if (!markdownOrHtml) {
+    return results;
+  }
+
+  const markdownRegex = /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
+  let markdownMatch: RegExpExecArray | null;
+  while ((markdownMatch = markdownRegex.exec(markdownOrHtml)) !== null) {
+    const [, altText, rawUrl] = markdownMatch;
+    results.push({
+      altText: altText?.trim() || undefined,
+      rawUrl: rawUrl.trim(),
+      markdownFragment: markdownMatch[0],
+    });
+  }
+
+  const htmlRegex = /<img[^>]*src=["']([^"']+)["'][^>]*>/gi;
+  let htmlMatch: RegExpExecArray | null;
+  while ((htmlMatch = htmlRegex.exec(markdownOrHtml)) !== null) {
+    const src = htmlMatch[1]?.trim();
+    if (!src) {
+      continue;
+    }
+
+    const altMatch = /alt=["']([^"']*)["']/i.exec(htmlMatch[0]);
+    results.push({
+      altText: altMatch?.[1]?.trim() || undefined,
+      rawUrl: src,
+      markdownFragment: htmlMatch[0],
+    });
+  }
+
+  return results;
 }
 
 function validateCommitActions(toolName: string, actions: CommitActionInput[]) {
@@ -541,6 +707,14 @@ server.registerTool(
         .string()
         .optional()
         .describe("GitLab username to resolve as assignee (optional)."),
+      assignee_usernames: z
+        .array(z.string())
+        .optional()
+        .describe("Optional assignee GitLab usernames. Resolved to assignee_ids internally."),
+      assign_to_current_user_if_missing: z
+        .boolean()
+        .optional()
+        .describe("When true, assign issue to current token user if no assignee is provided."),
       append_log: z
         .boolean()
         .optional()
@@ -639,7 +813,11 @@ server.registerTool(
       });
     })();
 
-    const assigneeIds = await resolveAssigneeIdsFromUsername(assigneeUsername);
+    const assigneeIds = await resolveIssueAssigneeIds("workflow_start", {
+      assigneeUsernames: args.assignee_usernames,
+      assigneeUsername,
+      assignToCurrentUserIfMissing: args.assign_to_current_user_if_missing ?? true,
+    });
     const issue = await gitlab.createIssue({
       projectId: issueProjectId,
       title: issueTitle,
@@ -1119,6 +1297,146 @@ server.registerTool(
 );
 
 server.registerTool(
+  "gitlab_get_current_user",
+  {
+    description: "Get current authenticated GitLab user (/user).",
+    outputSchema: gitlabGetCurrentUserOutputSchema,
+    inputSchema: {},
+  },
+  withToolErrorHandling("gitlab_get_current_user", async () => {
+    return gitlab.getCurrentUser();
+  }),
+);
+
+server.registerTool(
+  "gitlab_list_labels",
+  {
+    description: "List labels of a GitLab project (/projects/:id/labels).",
+    outputSchema: gitlabListLabelsOutputSchema,
+    inputSchema: {
+      project_id: z.number().int().positive().optional().describe("GitLab project ID."),
+      search: z.string().optional().describe("Search text for label name/description."),
+      page: z.number().int().positive().optional().describe("Page number."),
+      per_page: z.number().int().positive().optional().describe("Items per page."),
+      with_counts: z.boolean().optional().describe("Whether to include issue counts."),
+      include_ancestor_groups: z
+        .boolean()
+        .optional()
+        .describe("Whether to include ancestor group labels."),
+    },
+  },
+  withToolErrorHandling("gitlab_list_labels", async (args) => {
+    const projectId = requireNumberParam("gitlab_list_labels", "project_id", args.project_id, undefined);
+    enforceAnyLockedProject("gitlab_list_labels", projectId);
+    const page = ensurePositiveIntOptional("gitlab_list_labels", "page", args.page);
+    const perPage = ensurePositiveIntOptional("gitlab_list_labels", "per_page", args.per_page);
+    return gitlab.listLabels(projectId, {
+      search: args.search?.trim(),
+      page,
+      perPage,
+      withCounts: args.with_counts,
+      includeAncestorGroups: args.include_ancestor_groups,
+    });
+  }),
+);
+
+server.registerTool(
+  "gitlab_create_label",
+  {
+    description: "Create a project label (/projects/:id/labels).",
+    outputSchema: gitlabCreateLabelOutputSchema,
+    inputSchema: {
+      project_id: z.number().int().positive().optional().describe("GitLab project ID."),
+      name: z.string().optional().describe("Label name."),
+      color: z.string().optional().describe("Label color, e.g. #FF8800."),
+      description: z.string().optional().describe("Label description."),
+      priority: z.number().int().positive().optional().describe("Label priority."),
+    },
+  },
+  withToolErrorHandling("gitlab_create_label", async (args) => {
+    const projectId = requireNumberParam("gitlab_create_label", "project_id", args.project_id, undefined);
+    const name = requireStringParam("gitlab_create_label", "name", args.name, undefined);
+    const color = ensureHexColor(
+      "gitlab_create_label",
+      "color",
+      requireStringParam("gitlab_create_label", "color", args.color, undefined),
+    );
+    const priority = ensurePositiveIntOptional("gitlab_create_label", "priority", args.priority);
+    enforceAnyLockedProject("gitlab_create_label", projectId);
+    return gitlab.createLabel({
+      projectId,
+      name,
+      color,
+      description: args.description?.trim(),
+      priority,
+    });
+  }),
+);
+
+server.registerTool(
+  "gitlab_update_label",
+  {
+    description: "Update a project label (/projects/:id/labels).",
+    outputSchema: gitlabUpdateLabelOutputSchema,
+    inputSchema: {
+      project_id: z.number().int().positive().optional().describe("GitLab project ID."),
+      name: z.string().optional().describe("Existing label name."),
+      new_name: z.string().optional().describe("New label name."),
+      color: z.string().optional().describe("New color, e.g. #00AAFF."),
+      description: z.string().optional().describe("New label description."),
+      priority: z.number().int().positive().optional().describe("New label priority."),
+    },
+  },
+  withToolErrorHandling("gitlab_update_label", async (args) => {
+    const projectId = requireNumberParam("gitlab_update_label", "project_id", args.project_id, undefined);
+    const name = requireStringParam("gitlab_update_label", "name", args.name, undefined);
+    const priority = ensurePositiveIntOptional("gitlab_update_label", "priority", args.priority);
+    const color = args.color
+      ? ensureHexColor("gitlab_update_label", "color", args.color)
+      : undefined;
+    if (!args.new_name && !args.color && args.description === undefined && priority === undefined) {
+      invalidParam(
+        "gitlab_update_label",
+        "new_name|color|description|priority",
+        "at least one update field is required",
+      );
+    }
+    enforceAnyLockedProject("gitlab_update_label", projectId);
+    return gitlab.updateLabel({
+      projectId,
+      name,
+      newName: args.new_name?.trim(),
+      color,
+      description: args.description?.trim(),
+      priority,
+    });
+  }),
+);
+
+server.registerTool(
+  "gitlab_delete_label",
+  {
+    description: "Delete a project label (/projects/:id/labels/:label_id).",
+    outputSchema: gitlabDeleteLabelOutputSchema,
+    inputSchema: {
+      project_id: z.number().int().positive().optional().describe("GitLab project ID."),
+      label_name: z.string().optional().describe("Label name to delete."),
+    },
+  },
+  withToolErrorHandling("gitlab_delete_label", async (args) => {
+    const projectId = requireNumberParam("gitlab_delete_label", "project_id", args.project_id, undefined);
+    const labelName = requireStringParam("gitlab_delete_label", "label_name", args.label_name, undefined);
+    enforceAnyLockedProject("gitlab_delete_label", projectId);
+    await gitlab.deleteLabel(projectId, labelName);
+    return {
+      deleted: true,
+      label_name: labelName,
+      project_id: projectId,
+    };
+  }),
+);
+
+server.registerTool(
   "gitlab_create_issue",
   {
     description: "Create an issue with GitLab REST API /projects/:id/issues.",
@@ -1129,6 +1447,14 @@ server.registerTool(
       description: z.string().optional().describe("Issue description markdown."),
       labels: z.array(z.string()).optional().describe("Issue labels array."),
       assignee_ids: z.array(z.number().int().positive()).optional().describe("Assignee user IDs."),
+      assignee_usernames: z
+        .array(z.string())
+        .optional()
+        .describe("Optional assignee GitLab usernames. Resolved to assignee_ids internally."),
+      assign_to_current_user_if_missing: z
+        .boolean()
+        .optional()
+        .describe("When true, assign issue to current token user if no assignee is provided."),
       milestone_id: z.number().int().positive().optional().describe("Milestone ID."),
       due_date: z.string().optional().describe("Due date in YYYY-MM-DD."),
       confidential: z.boolean().optional().describe("Whether issue is confidential."),
@@ -1140,18 +1466,68 @@ server.registerTool(
     enforceIssueProjectLock("gitlab_create_issue", projectId);
     const title = requireStringParam("gitlab_create_issue", "title", args.title, undefined);
     const dueDate = ensureIsoDate("gitlab_create_issue", "due_date", args.due_date);
+    const assigneeIds = await resolveIssueAssigneeIds("gitlab_create_issue", {
+      assigneeIds: args.assignee_ids,
+      assigneeUsernames: args.assignee_usernames,
+      assignToCurrentUserIfMissing: args.assign_to_current_user_if_missing ?? true,
+    });
+
     const issue = await gitlab.createIssue({
       projectId,
       title,
       description: args.description,
       labels: normalizeStringArray(args.labels),
-      assigneeIds: normalizePositiveIntArray("gitlab_create_issue", "assignee_ids", args.assignee_ids),
+      assigneeIds,
       milestoneId: args.milestone_id,
       dueDate,
       confidential: args.confidential,
       issueType: args.issue_type,
     });
     return issue;
+  }),
+);
+
+server.registerTool(
+  "gitlab_get_merge_request",
+  {
+    description: "Get merge request detail (/projects/:id/merge_requests/:mr_iid).",
+    outputSchema: gitlabGetMergeRequestOutputSchema,
+    inputSchema: {
+      project_id: z.number().int().positive().optional().describe("GitLab project ID."),
+      mr_iid: z.number().int().positive().optional().describe("Merge request IID."),
+    },
+  },
+  withToolErrorHandling("gitlab_get_merge_request", async (args) => {
+    const projectId = requireNumberParam("gitlab_get_merge_request", "project_id", args.project_id, undefined);
+    const mrIid = requireNumberParam("gitlab_get_merge_request", "mr_iid", args.mr_iid, undefined);
+    enforceCodeProjectLock("gitlab_get_merge_request", projectId);
+    return gitlab.getMergeRequest(projectId, mrIid);
+  }),
+);
+
+server.registerTool(
+  "gitlab_get_mr_notes",
+  {
+    description: "Get merge request notes/comments (/projects/:id/merge_requests/:mr_iid/notes).",
+    outputSchema: gitlabGetMrNotesOutputSchema,
+    inputSchema: {
+      project_id: z.number().int().positive().optional().describe("GitLab project ID."),
+      mr_iid: z.number().int().positive().optional().describe("Merge request IID."),
+      sort: z.enum(["asc", "desc"]).optional().describe("Sort order."),
+      order_by: z
+        .enum(["created_at", "updated_at"])
+        .optional()
+        .describe("Field used for ordering."),
+    },
+  },
+  withToolErrorHandling("gitlab_get_mr_notes", async (args) => {
+    const projectId = requireNumberParam("gitlab_get_mr_notes", "project_id", args.project_id, undefined);
+    const mrIid = requireNumberParam("gitlab_get_mr_notes", "mr_iid", args.mr_iid, undefined);
+    enforceCodeProjectLock("gitlab_get_mr_notes", projectId);
+    return gitlab.getMergeRequestNotes(projectId, mrIid, {
+      sort: args.sort,
+      orderBy: args.order_by,
+    });
   }),
 );
 
@@ -1170,6 +1546,159 @@ server.registerTool(
     const issueIid = requireNumberParam("gitlab_get_issue", "issue_iid", args.issue_iid, undefined);
     enforceIssueProjectLock("gitlab_get_issue", projectId);
     return gitlab.getIssue(projectId, issueIid);
+  }),
+);
+
+server.registerTool(
+  "gitlab_upload_project_file",
+  {
+    description:
+      "Upload binary file to project markdown uploads and return markdown/url metadata.",
+    outputSchema: gitlabUploadProjectFileOutputSchema,
+    inputSchema: {
+      project_id: z.number().int().positive().optional().describe("GitLab project ID."),
+      filename: z.string().optional().describe("Original file name."),
+      content_base64: z.string().optional().describe("File content encoded in base64."),
+      content_type: z
+        .string()
+        .optional()
+        .describe("Optional MIME type, e.g. image/png."),
+    },
+  },
+  withToolErrorHandling("gitlab_upload_project_file", async (args) => {
+    const projectId = requireNumberParam(
+      "gitlab_upload_project_file",
+      "project_id",
+      args.project_id,
+      undefined,
+    );
+    const filename = requireStringParam("gitlab_upload_project_file", "filename", args.filename, undefined);
+    const contentBase64 = requireStringParam(
+      "gitlab_upload_project_file",
+      "content_base64",
+      args.content_base64,
+      undefined,
+    );
+    enforceAnyLockedProject("gitlab_upload_project_file", projectId);
+    return gitlab.uploadProjectFile({
+      projectId,
+      filename,
+      contentBase64,
+      contentType: args.content_type?.trim(),
+    });
+  }),
+);
+
+server.registerTool(
+  "gitlab_get_issue_images",
+  {
+    description:
+      "Extract image references from issue description/notes, optionally downloading image base64 payloads.",
+    outputSchema: gitlabGetIssueImagesOutputSchema,
+    inputSchema: {
+      project_id: z.number().int().positive().optional().describe("GitLab project ID."),
+      issue_iid: z.number().int().positive().optional().describe("Issue IID."),
+      include_notes: z
+        .boolean()
+        .optional()
+        .describe("Whether to extract images from issue notes as well."),
+      include_base64: z
+        .boolean()
+        .optional()
+        .describe("Whether to download every extracted image and include base64."),
+      max_images: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Maximum number of image references to return."),
+    },
+  },
+  withToolErrorHandling("gitlab_get_issue_images", async (args) => {
+    const projectId = requireNumberParam("gitlab_get_issue_images", "project_id", args.project_id, undefined);
+    const issueIid = requireNumberParam("gitlab_get_issue_images", "issue_iid", args.issue_iid, undefined);
+    const includeNotes = args.include_notes ?? true;
+    const includeBase64 = args.include_base64 ?? false;
+    const maxImages = ensurePositiveIntRangeOptional(
+      "gitlab_get_issue_images",
+      "max_images",
+      args.max_images,
+      200,
+    ) ?? 50;
+
+    enforceIssueProjectLock("gitlab_get_issue_images", projectId);
+
+    const issue = await gitlab.getIssue(projectId, issueIid);
+    const imageRows: Array<Record<string, unknown>> = [];
+
+    const issueDescription = typeof issue.description === "string" ? issue.description : "";
+    for (const imageRef of extractImageReferences(issueDescription)) {
+      imageRows.push({
+        source: "issue_description",
+        alt_text: imageRef.altText,
+        raw_url: imageRef.rawUrl,
+        resolved_url: gitlab.resolveWebUrl(imageRef.rawUrl),
+        markdown_fragment: imageRef.markdownFragment,
+      });
+    }
+
+    if (includeNotes) {
+      const notes = await gitlab.getIssueNotes(projectId, issueIid, {
+        sort: "asc",
+        orderBy: "created_at",
+      });
+      for (const note of notes as any[]) {
+        const body = typeof note?.body === "string" ? note.body : "";
+        const imageRefs = extractImageReferences(body);
+        for (const imageRef of imageRefs) {
+          imageRows.push({
+            source: "issue_note",
+            note_id: Number.isInteger(note?.id) ? note.id : undefined,
+            note_created_at:
+              typeof note?.created_at === "string" ? note.created_at : undefined,
+            alt_text: imageRef.altText,
+            raw_url: imageRef.rawUrl,
+            resolved_url: gitlab.resolveWebUrl(imageRef.rawUrl),
+            markdown_fragment: imageRef.markdownFragment,
+          });
+        }
+      }
+    }
+
+    const dedupedRows = Array.from(
+      new Map(
+        imageRows.map((item) => [
+          `${item.source}|${item.note_id ?? 0}|${item.raw_url}|${item.markdown_fragment}`,
+          item,
+        ]),
+      ).values(),
+    ).slice(0, maxImages);
+
+    if (includeBase64) {
+      for (const imageRow of dedupedRows) {
+        const rawUrl = imageRow.raw_url;
+        if (typeof rawUrl !== "string") {
+          continue;
+        }
+        try {
+          const download = await gitlab.downloadBinaryAsBase64(rawUrl);
+          imageRow.content_type = download.content_type;
+          imageRow.size_bytes = download.size_bytes;
+          imageRow.base64 = download.base64;
+          imageRow.resolved_url = download.resolved_url;
+        } catch (error) {
+          imageRow.fetch_error =
+            error instanceof Error ? error.message : String(error);
+        }
+      }
+    }
+
+    return {
+      issue_iid: issueIid,
+      issue_web_url: typeof issue.web_url === "string" ? issue.web_url : undefined,
+      image_count: dedupedRows.length,
+      images: dedupedRows,
+    };
   }),
 );
 

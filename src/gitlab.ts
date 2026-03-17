@@ -3,6 +3,8 @@ export interface GitLabClientOptions {
   token: string;
 }
 
+type QueryValue = string | number | boolean;
+
 export type CommitActionType = "create" | "delete" | "move" | "update" | "chmod";
 
 export interface CommitActionInput {
@@ -49,13 +51,60 @@ export interface CreateCommitInput {
   startBranch?: string;
 }
 
+export interface LabelListOptions {
+  search?: string;
+  page?: number;
+  perPage?: number;
+  withCounts?: boolean;
+  includeAncestorGroups?: boolean;
+}
+
+export interface CreateLabelInput {
+  projectId: number;
+  name: string;
+  color: string;
+  description?: string;
+  priority?: number;
+}
+
+export interface UpdateLabelInput {
+  projectId: number;
+  name: string;
+  newName?: string;
+  color?: string;
+  description?: string;
+  priority?: number;
+}
+
+export interface MergeRequestNotesOptions {
+  sort?: "asc" | "desc";
+  orderBy?: "created_at" | "updated_at";
+}
+
+export interface UploadProjectFileInput {
+  projectId: number;
+  filename: string;
+  contentBase64: string;
+  contentType?: string;
+}
+
+export interface DownloadBinaryAsBase64Result {
+  source_url: string;
+  resolved_url: string;
+  content_type?: string;
+  size_bytes: number;
+  base64: string;
+}
+
 export class GitLabClient {
   private readonly apiBaseUrl: string;
   private readonly token: string;
+  private readonly webBaseUrl: string;
 
   constructor(options: GitLabClientOptions) {
     this.apiBaseUrl = options.apiBaseUrl.replace(/\/+$/, "");
     this.token = options.token;
+    this.webBaseUrl = this.apiBaseUrl.replace(/\/api\/v4\/?$/i, "");
   }
 
   async findUserIdByUsername(username: string): Promise<number | null> {
@@ -73,6 +122,87 @@ export class GitLabClient {
 
     const exact = users.find((user) => user.username === username);
     return exact?.id ?? users[0].id;
+  }
+
+  async getCurrentUser(): Promise<any> {
+    return this.request("/user", {
+      method: "GET",
+    });
+  }
+
+  async listLabels(projectId: number, options?: LabelListOptions): Promise<any> {
+    const query: Record<string, QueryValue> = {};
+    if (options?.search) {
+      query.search = options.search;
+    }
+    if (options?.page !== undefined) {
+      query.page = options.page;
+    }
+    if (options?.perPage !== undefined) {
+      query.per_page = options.perPage;
+    }
+    if (options?.withCounts !== undefined) {
+      query.with_counts = options.withCounts;
+    }
+    if (options?.includeAncestorGroups !== undefined) {
+      query.include_ancestor_groups = options.includeAncestorGroups;
+    }
+
+    return this.request(`/projects/${encodeURIComponent(String(projectId))}/labels`, {
+      method: "GET",
+      query,
+    });
+  }
+
+  async createLabel(input: CreateLabelInput): Promise<any> {
+    const body: Record<string, unknown> = {
+      name: input.name,
+      color: input.color,
+    };
+    if (input.description !== undefined) {
+      body.description = input.description;
+    }
+    if (input.priority !== undefined) {
+      body.priority = input.priority;
+    }
+
+    return this.request(`/projects/${encodeURIComponent(String(input.projectId))}/labels`, {
+      method: "POST",
+      body,
+    });
+  }
+
+  async updateLabel(input: UpdateLabelInput): Promise<any> {
+    const body: Record<string, unknown> = {
+      name: input.name,
+    };
+
+    if (input.newName !== undefined) {
+      body.new_name = input.newName;
+    }
+    if (input.color !== undefined) {
+      body.color = input.color;
+    }
+    if (input.description !== undefined) {
+      body.description = input.description;
+    }
+    if (input.priority !== undefined) {
+      body.priority = input.priority;
+    }
+
+    return this.request(`/projects/${encodeURIComponent(String(input.projectId))}/labels`, {
+      method: "PUT",
+      body,
+    });
+  }
+
+  async deleteLabel(projectId: number, labelName: string): Promise<any> {
+    return this.request(
+      `/projects/${encodeURIComponent(String(projectId))}/labels/${encodeURIComponent(labelName)}`,
+      {
+        method: "DELETE",
+      },
+    );
   }
 
   async createIssue(input: CreateIssueInput): Promise<any> {
@@ -262,6 +392,15 @@ export class GitLabClient {
     );
   }
 
+  async getMergeRequest(projectId: number, mrIid: number): Promise<any> {
+    return this.request(
+      `/projects/${encodeURIComponent(String(projectId))}/merge_requests/${encodeURIComponent(String(mrIid))}`,
+      {
+        method: "GET",
+      },
+    );
+  }
+
   async getMergeRequestChanges(projectId: number, mrIid: number): Promise<any> {
     return this.request(
       `/projects/${encodeURIComponent(String(projectId))}/merge_requests/${encodeURIComponent(String(mrIid))}/changes`,
@@ -295,21 +434,121 @@ export class GitLabClient {
     );
   }
 
+  async getMergeRequestNotes(
+    projectId: number,
+    mrIid: number,
+    options?: MergeRequestNotesOptions,
+  ): Promise<any> {
+    const query: Record<string, QueryValue> = {};
+    if (options?.sort) {
+      query.sort = options.sort;
+    }
+    if (options?.orderBy) {
+      query.order_by = options.orderBy;
+    }
+
+    return this.request(
+      `/projects/${encodeURIComponent(String(projectId))}/merge_requests/${encodeURIComponent(String(mrIid))}/notes`,
+      {
+        method: "GET",
+        query,
+      },
+    );
+  }
+
+  async uploadProjectFile(input: UploadProjectFileInput): Promise<any> {
+    const buffer = Buffer.from(input.contentBase64, "base64");
+    const formData = new FormData();
+    formData.append(
+      "file",
+      new Blob([buffer], {
+        type: input.contentType ?? "application/octet-stream",
+      }),
+      input.filename,
+    );
+
+    const response = await fetch(
+      this.buildApiUrl(`/projects/${encodeURIComponent(String(input.projectId))}/uploads`),
+      {
+        method: "POST",
+        headers: {
+          "PRIVATE-TOKEN": this.token,
+        },
+        body: formData,
+      },
+    );
+    const responseText = await response.text();
+    if (!response.ok) {
+      throw new Error(
+        `GitLab API POST /projects/:id/uploads failed (${response.status} ${response.statusText}): ${responseText}`,
+      );
+    }
+    if (!responseText) {
+      return {};
+    }
+    return JSON.parse(responseText) as any;
+  }
+
+  resolveWebUrl(urlOrPath: string): string {
+    const trimmed = urlOrPath.trim();
+    if (/^https?:\/\//i.test(trimmed)) {
+      return trimmed;
+    }
+    if (trimmed.startsWith("/")) {
+      return `${this.webBaseUrl}${trimmed}`;
+    }
+    return `${this.webBaseUrl}/${trimmed}`;
+  }
+
+  async downloadBinaryAsBase64(urlOrPath: string): Promise<DownloadBinaryAsBase64Result> {
+    const resolvedUrl = this.resolveWebUrl(urlOrPath);
+    const response = await fetch(resolvedUrl, {
+      method: "GET",
+      headers: {
+        "PRIVATE-TOKEN": this.token,
+      },
+    });
+    if (!response.ok) {
+      const responseText = await response.text();
+      throw new Error(
+        `GitLab binary download failed (${response.status} ${response.statusText}) for ${resolvedUrl}: ${responseText}`,
+      );
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    return {
+      source_url: urlOrPath,
+      resolved_url: resolvedUrl,
+      content_type: response.headers.get("content-type") ?? undefined,
+      size_bytes: buffer.byteLength,
+      base64: buffer.toString("base64"),
+    };
+  }
+
+  private buildApiUrl(path: string, query?: Record<string, QueryValue | undefined>): URL {
+    const url = new URL(`${this.apiBaseUrl}${path}`);
+    if (!query) {
+      return url;
+    }
+    for (const [key, value] of Object.entries(query)) {
+      if (value === undefined || value === null) {
+        continue;
+      }
+      url.searchParams.set(key, String(value));
+    }
+    return url;
+  }
+
   private async request<T>(
     path: string,
     options: {
       method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
-      query?: Record<string, string>;
+      query?: Record<string, QueryValue | undefined>;
       body?: Record<string, unknown>;
     },
   ): Promise<T> {
-    const url = new URL(`${this.apiBaseUrl}${path}`);
-
-    if (options.query) {
-      for (const [key, value] of Object.entries(options.query)) {
-        url.searchParams.set(key, value);
-      }
-    }
+    const url = this.buildApiUrl(path, options.query);
 
     const headers: Record<string, string> = {
       "PRIVATE-TOKEN": this.token,

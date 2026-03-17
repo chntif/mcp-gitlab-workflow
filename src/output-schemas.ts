@@ -181,6 +181,65 @@ const gitlabApprovalSchema = z
   })
   .passthrough();
 
+const gitlabUserSchema = z
+  .object({
+    id: z.number().describe("User ID."),
+    username: z.unknown().optional().describe("GitLab username."),
+    name: z.unknown().optional().describe("Display name."),
+    state: z.unknown().optional().describe("Account state."),
+    web_url: z.unknown().optional().describe("Profile URL."),
+  })
+  .passthrough();
+
+const gitlabLabelSchema = z
+  .object({
+    id: z.unknown().optional().describe("Label ID."),
+    name: z.unknown().optional().describe("Label name."),
+    color: z.unknown().optional().describe("Label color hex."),
+    text_color: z.unknown().optional().describe("Label text color."),
+    description: z.unknown().optional().describe("Label description."),
+    priority: z.unknown().optional().describe("Label priority."),
+    is_project_label: z.unknown().optional().describe("Whether this is a project-scoped label."),
+  })
+  .passthrough();
+
+const gitlabDeleteLabelSchema = z.object({
+  deleted: z.boolean().describe("Whether label delete call completed."),
+  label_name: z.string().describe("Deleted label name."),
+  project_id: z.number().describe("Target project ID."),
+});
+
+const gitlabUploadProjectFileSchema = z
+  .object({
+    id: z.unknown().optional().describe("Upload ID if provided by GitLab."),
+    alt: z.unknown().optional().describe("Uploaded file alt text."),
+    url: z.unknown().optional().describe("Relative upload URL."),
+    full_path: z.unknown().optional().describe("Full web path of uploaded asset."),
+    markdown: z.unknown().optional().describe("Markdown snippet referencing uploaded file."),
+  })
+  .passthrough();
+
+const issueImageItemSchema = z.object({
+  source: z.enum(["issue_description", "issue_note"]).describe("Where the image reference was found."),
+  note_id: z.number().optional().describe("Issue note ID when source is issue_note."),
+  note_created_at: z.string().optional().describe("Issue note creation timestamp."),
+  alt_text: z.string().optional().describe("Image alt text."),
+  raw_url: z.string().describe("Raw URL/path parsed from markdown or HTML."),
+  resolved_url: z.string().describe("Absolute URL resolved against GitLab host."),
+  markdown_fragment: z.string().describe("Original markdown/html fragment containing the image link."),
+  content_type: z.string().optional().describe("Downloaded image content type."),
+  size_bytes: z.number().optional().describe("Downloaded byte size."),
+  base64: z.string().optional().describe("Image base64 content when include_base64=true."),
+  fetch_error: z.string().optional().describe("Download error message for this image."),
+});
+
+const gitlabIssueImagesSchema = z.object({
+  issue_iid: z.number().describe("Issue IID."),
+  issue_web_url: z.string().optional().describe("Issue web URL."),
+  image_count: z.number().describe("Total parsed image references."),
+  images: z.array(issueImageItemSchema).describe("Parsed image references."),
+});
+
 export const workflowParseRequirementOutputSchema = createToolOutputSchema(
   workflowParseRequirementDataSchema,
   "Parsed requirement result.",
@@ -253,4 +312,40 @@ export const gitlabApproveMrOutputSchema = createToolOutputSchema(
 export const gitlabUnapproveMrOutputSchema = createToolOutputSchema(
   gitlabApprovalSchema,
   "GitLab merge request unapproval payload.",
+);
+export const gitlabGetCurrentUserOutputSchema = createToolOutputSchema(
+  gitlabUserSchema,
+  "Current authenticated GitLab user payload.",
+);
+export const gitlabListLabelsOutputSchema = createToolOutputSchema(
+  z.array(gitlabLabelSchema),
+  "Label list payload for the target project.",
+);
+export const gitlabCreateLabelOutputSchema = createToolOutputSchema(
+  gitlabLabelSchema,
+  "Created label payload.",
+);
+export const gitlabUpdateLabelOutputSchema = createToolOutputSchema(
+  gitlabLabelSchema,
+  "Updated label payload.",
+);
+export const gitlabDeleteLabelOutputSchema = createToolOutputSchema(
+  gitlabDeleteLabelSchema,
+  "Label deletion result payload.",
+);
+export const gitlabGetMergeRequestOutputSchema = createToolOutputSchema(
+  gitlabMergeRequestSchema,
+  "Merge request detail payload.",
+);
+export const gitlabGetMrNotesOutputSchema = createToolOutputSchema(
+  z.array(gitlabNoteSchema),
+  "Merge request notes list payload.",
+);
+export const gitlabUploadProjectFileOutputSchema = createToolOutputSchema(
+  gitlabUploadProjectFileSchema,
+  "Project markdown upload payload.",
+);
+export const gitlabGetIssueImagesOutputSchema = createToolOutputSchema(
+  gitlabIssueImagesSchema,
+  "Parsed issue image references with optional base64 payloads.",
 );
