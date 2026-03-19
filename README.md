@@ -69,23 +69,40 @@
 
 ## 5. 环境变量
 
-必填：
+说明：
+
+- 环境变量统一走“工具参数 -> 用户 env -> 代码内默认值”的优先级
+- 只有通用且安全的配置项才提供内置默认值；项目 ID、本地仓库路径这类与具体环境强相关的字段默认仍然是未配置状态
+- 对工具中带 env fallback 的字段，建议“未明确指定就省略”，让服务回落到当前配置值；如果当前配置仍未设置，服务会返回缺参错误，不应让模型自行猜测
+
+启动必需有效值：
 
 - `GITLAB_TOKEN`
 - `GITLAB_API_BASE_URL`
 
-可选默认值：
+已提供的内置默认值：
+
+- `GITLAB_API_BASE_URL=https://gitlab.com/api/v4`
+- `WORKFLOW_BASE_BRANCH=develop`
+- `WORKFLOW_TARGET_BRANCH=develop`
+- `WORKFLOW_ISSUE_LOG_PATH=issue-log.md`
+- `WORKFLOW_LOCAL_REMOTE_NAME=origin`
+
+默认未配置、需要用户显式传参或设置 env 的配置项：
 
 - `WORKFLOW_ISSUE_PROJECT_ID`
 - `WORKFLOW_ISSUE_PROJECT_PATH`
 - `WORKFLOW_CODE_PROJECT_ID`
 - `WORKFLOW_CODE_PROJECT_PATH`
+- `WORKFLOW_LOCAL_REPO_PATH`
+
+其余配置项可以通过 env 覆盖内置默认值：
+
 - `WORKFLOW_BASE_BRANCH`
 - `WORKFLOW_TARGET_BRANCH`
 - `WORKFLOW_LABEL`
 - `WORKFLOW_ASSIGNEE_USERNAME`
 - `WORKFLOW_ISSUE_LOG_PATH`
-- `WORKFLOW_LOCAL_REPO_PATH`
 - `WORKFLOW_LOCAL_REMOTE_NAME`
 
 可选强约束（锁项目）：
