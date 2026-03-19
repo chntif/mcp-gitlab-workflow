@@ -57,13 +57,34 @@ const workflowAnalyzeAndCreateIssueDataSchema = z.object({
 });
 
 const workflowReviewMrAndCommentDataSchema = z.object({
+  mode: z.enum(["prepared", "posted"]).describe("Whether the tool prepared review context or posted a comment."),
   merge_request: mergeRequestBriefSchema.describe("Target merge request metadata."),
+  prepared_review: z
+    .object({
+      review_prompt: z.string().describe("Concise prompt text for an external LLM reviewer."),
+      changed_files: z.array(z.string()).describe("Changed file paths included in review context."),
+      diffs: z.array(
+        z.object({
+          old_path: z.string().optional().describe("Previous file path."),
+          new_path: z.string().optional().describe("Current file path."),
+          diff: z.string().describe("Unified diff content for this file."),
+          new_file: z.boolean().optional().describe("Whether this file is newly created."),
+          renamed_file: z.boolean().optional().describe("Whether this file was renamed."),
+          deleted_file: z.boolean().optional().describe("Whether this file was deleted."),
+          diff_truncated: z.boolean().optional().describe("Whether diff content was truncated."),
+        }),
+      ).describe("Prepared diff payload for LLM review."),
+      existing_notes_count: z.number().optional().describe("Existing MR notes count when loaded."),
+    })
+    .optional()
+    .describe("Prepared MR review context for an external LLM."),
   review_note: z
     .object({
       note_id: z.number().describe("Created review note ID."),
       body: z.string().describe("Review note markdown body."),
       web_url: z.string().nullable().describe("MR/note URL when available."),
     })
+    .optional()
     .describe("Review comment result."),
   approval: z
     .object({

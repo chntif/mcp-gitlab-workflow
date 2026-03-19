@@ -10,6 +10,8 @@ export interface WorkflowEnvDefaults {
   issueLogPath?: string;
   localRepoPath?: string;
   localGitRemoteName?: string;
+  checkoutLocalBranch?: boolean;
+  updateIssueLog?: boolean;
 }
 
 export interface WorkflowLocks {
@@ -37,8 +39,10 @@ export const DEFAULT_RUNTIME_CONFIG: RuntimeConfig = {
     label: undefined,
     assigneeUsername: undefined,
     issueLogPath: "issue-log.md",
-    localRepoPath: undefined,
+    localRepoPath: process.cwd(),
     localGitRemoteName: "origin",
+    checkoutLocalBranch: false,
+    updateIssueLog: true,
   },
   locks: {
     issueProjectId: undefined,
@@ -90,6 +94,14 @@ export function getRuntimeConfig(): RuntimeConfig {
         "WORKFLOW_LOCAL_REMOTE_NAME",
         DEFAULT_RUNTIME_CONFIG.defaults.localGitRemoteName,
       ),
+      checkoutLocalBranch: booleanEnv(
+        "WORKFLOW_CHECKOUT_LOCAL_BRANCH",
+        DEFAULT_RUNTIME_CONFIG.defaults.checkoutLocalBranch,
+      ),
+      updateIssueLog: booleanEnv(
+        "WORKFLOW_UPDATE_ISSUE_LOG",
+        DEFAULT_RUNTIME_CONFIG.defaults.updateIssueLog,
+      ),
     },
     locks: {
       issueProjectId: intEnv(
@@ -112,6 +124,23 @@ function intEnv(envName: string, errorLabel: string, fallback?: number): number 
 
 function stringEnv(envName: string, fallback?: string): string | undefined {
   return optionalString(process.env[envName]) ?? fallback;
+}
+
+function booleanEnv(envName: string, fallback?: boolean): boolean | undefined {
+  const raw = optionalString(process.env[envName]);
+  if (!raw) {
+    return fallback;
+  }
+
+  const normalized = raw.toLowerCase();
+  if (normalized === "true" || normalized === "1" || normalized === "yes" || normalized === "on") {
+    return true;
+  }
+  if (normalized === "false" || normalized === "0" || normalized === "no" || normalized === "off") {
+    return false;
+  }
+
+  throw new Error(`Invalid env ${envName}: must be a boolean like true/false`);
 }
 
 function parseOptionalInt(raw: string | undefined, envName: string, fallback?: number): number | undefined {

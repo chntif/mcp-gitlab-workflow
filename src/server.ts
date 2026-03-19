@@ -21,6 +21,7 @@ import {
   renderTemplate,
   summarizeRequirement,
 } from "./workflow.js";
+import { buildPreparedMrReviewContext } from "./review.js";
 import {
   gitlabAddIssueCommentOutputSchema,
   gitlabApproveMrOutputSchema,
@@ -1641,7 +1642,7 @@ server.registerTool(
   "workflow_review_mr_post_comment",
   {
     description:
-      "Use when an existing MR should be reviewed and a review comment should be posted (optional approval).",
+      "Two-step MR review workflow. Step 1: call with prepare_review_context=true to fetch review_prompt + diffs for LLM review. Step 2: let the LLM inspect that context, then call again with review_comment_body to post the final review comment (optional approval).",
     outputSchema: workflowReviewMrAndCommentOutputSchema,
     inputSchema: {
       code_project_id: z
@@ -1654,7 +1655,15 @@ server.registerTool(
       review_comment_body: z
         .string()
         .optional()
-        .describe("Direct review comment markdown body."),
+        .describe(
+          "Step 2 of 2. Final review comment markdown body, generated after the LLM inspects prepared_review.review_prompt + prepared_review.diffs from the prepare step.",
+        ),
+      prepare_review_context: z
+        .boolean()
+        .optional()
+        .describe(
+          "Step 1 of 2. When true, do not post a comment. Return concise review prompt text plus MR diff context for an external LLM. After the LLM generates review_comment_body, call this tool again without prepare_review_context to post the comment.",
+        ),
       review_summary: z
         .string()
         .optional()
@@ -1675,6 +1684,18 @@ server.registerTool(
         .string()
         .optional()
         .describe("Optional expected MR HEAD SHA when approve=true."),
+      max_changed_files: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Maximum number of changed files included in prepared review context. Default 20."),
+      max_diff_chars_per_file: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Maximum diff characters returned per file in prepared review context. Default 12000."),
     },
   },
   withToolErrorHandling("workflow_review_mr_post_comment", async (args) => {
@@ -1688,16 +1709,40 @@ server.registerTool(
     enforceCodeProjectLock("workflow_review_mr_post_comment", codeProjectId);
 
     const mr = await gitlab.getMergeRequest(codeProjectId, args.mr_iid);
+    const prepareReviewContext = args.prepare_review_context ?? false;
     const includeChanges = args.include_changes ?? true;
     const includeExistingNotes = args.include_existing_notes ?? false;
+    const maxChangedFiles =
+      ensurePositiveIntRangeOptional(
+        "workflow_review_mr_post_comment",
+        "max_changed_files",
+        args.max_changed_files,
+        50,
+      ) ?? 20;
+    const maxDiffCharsPerFile =
+      ensurePositiveIntRangeOptional(
+        "workflow_review_mr_post_comment",
+        "max_diff_chars_per_file",
+        args.max_diff_chars_per_file,
+        40000,
+      ) ?? 12000;
+
+    if (prepareReviewContext && !includeChanges) {
+      invalidParam(
+        "workflow_review_mr_post_comment",
+        "include_changes",
+        "must be true when prepare_review_context=true",
+      );
+    }
 
     let changedFileLines: string[] = [];
+    let changesPayload: any;
     if (includeChanges) {
-      const changes = await gitlab.getMergeRequestChanges(codeProjectId, args.mr_iid);
-      changedFileLines = ((changes?.changes ?? []) as any[])
+      changesPayload = await gitlab.getMergeRequestChanges(codeProjectId, args.mr_iid);
+      changedFileLines = ((changesPayload?.changes ?? []) as any[])
         .map((item) => (typeof item?.new_path === "string" ? item.new_path : item?.old_path))
         .filter((path): path is string => typeof path === "string")
-        .slice(0, 20)
+        .slice(0, maxChangedFiles)
         .map((path) => `- ${path}`);
     }
 
@@ -1710,16 +1755,31 @@ server.registerTool(
       existingNotesCount = (notes as any[]).length;
     }
 
-    const reviewBody = (() => {
-      if (args.review_comment_body?.trim()) {
-        return args.review_comment_body.trim();
-      }
-      return buildDefaultReviewComment({
-        summary: args.review_summary,
-        changedFiles: changedFileLines.map((line) => line.replace(/^- /, "")),
-        existingNotesCount,
-      });
-    })();
+    if (prepareReviewContext) {
+      return {
+        mode: "prepared" as const,
+        merge_request: {
+          id: mr.id,
+          iid: mr.iid,
+          title: mr.title,
+          web_url: mr.web_url,
+        },
+        prepared_review: buildPreparedMrReviewContext({
+          reviewSummary: args.review_summary,
+          existingNotesCount,
+          changesPayload,
+          maxFiles: maxChangedFiles,
+          maxDiffCharsPerFile,
+        }),
+      };
+    }
+
+    const reviewBody = args.review_comment_body?.trim();
+    if (!reviewBody) {
+      throw new ToolInputError(
+        "[workflow_review_mr_post_comment] Missing required parameter 'review_comment_body'. Two-step flow required: first call with prepare_review_context=true, let the LLM review 'prepared_review.review_prompt' + 'prepared_review.diffs', then call this tool again with the generated review_comment_body to post the comment.",
+      );
+    }
 
     const note = await gitlab.createMergeRequestNote(codeProjectId, args.mr_iid, reviewBody);
 
@@ -1737,6 +1797,7 @@ server.registerTool(
     }
 
     return {
+      mode: "posted" as const,
       merge_request: {
         id: mr.id,
         iid: mr.iid,
@@ -1871,7 +1932,12 @@ server.registerTool(
       checkout_local_branch: z
         .boolean()
         .optional()
-        .describe("Whether to fetch/pull and switch local repo to target branch."),
+        .describe(
+          envBackedDescription(
+            "Whether to fetch/pull and switch local repo to target branch.",
+            "WORKFLOW_CHECKOUT_LOCAL_BRANCH",
+          ),
+        ),
       local_repo_path: z
         .string()
         .optional()
@@ -1889,7 +1955,12 @@ server.registerTool(
         .string()
         .optional()
         .describe("Acceptance steps for generated issue comment."),
-      update_log: z.boolean().optional().describe("Whether to update local issue log."),
+      update_log: z
+        .boolean()
+        .optional()
+        .describe(
+          envBackedDescription("Whether to update local issue log.", "WORKFLOW_UPDATE_ISSUE_LOG"),
+        ),
       log_path: z
         .string()
         .optional()
@@ -1973,13 +2044,13 @@ server.registerTool(
       includeExistingNotesInReview: args.include_existing_notes_in_review,
       approveMr: args.approve_mr,
       approveSha: args.approve_sha,
-      checkoutLocalBranch: args.checkout_local_branch ?? true,
+      checkoutLocalBranch: args.checkout_local_branch ?? config.defaults.checkoutLocalBranch,
       localRepoPath: args.local_repo_path,
       localRemoteName: args.local_remote_name,
       issueCommentBody: args.issue_comment_body,
       implementationSummary: args.implementation_summary,
       acceptanceSteps: args.acceptance_steps,
-      updateLog: args.update_log ?? true,
+      updateLog: args.update_log ?? config.defaults.updateIssueLog,
       logPath: args.log_path,
       logStatus: args.log_status,
     });
@@ -2077,7 +2148,12 @@ server.registerTool(
       checkout_local_branch: z
         .boolean()
         .optional()
-        .describe("Whether to sync and switch local repo to created branch."),
+        .describe(
+          envBackedDescription(
+            "Whether to sync and switch local repo to created branch.",
+            "WORKFLOW_CHECKOUT_LOCAL_BRANCH",
+          ),
+        ),
       local_repo_path: z
         .string()
         .optional()
@@ -2092,7 +2168,12 @@ server.registerTool(
         .optional()
         .describe("Implementation summary for generated issue comment."),
       acceptance_steps: z.string().optional().describe("Acceptance steps for generated issue comment."),
-      update_log: z.boolean().optional().describe("Whether to update local issue log."),
+      update_log: z
+        .boolean()
+        .optional()
+        .describe(
+          envBackedDescription("Whether to update local issue log.", "WORKFLOW_UPDATE_ISSUE_LOG"),
+        ),
       log_path: z
         .string()
         .optional()
@@ -2205,13 +2286,13 @@ server.registerTool(
       includeExistingNotesInReview: args.include_existing_notes_in_review,
       approveMr: args.approve_mr,
       approveSha: args.approve_sha,
-      checkoutLocalBranch: args.checkout_local_branch ?? true,
+      checkoutLocalBranch: args.checkout_local_branch ?? config.defaults.checkoutLocalBranch,
       localRepoPath: args.local_repo_path,
       localRemoteName: args.local_remote_name,
       issueCommentBody: args.issue_comment_body,
       implementationSummary: args.implementation_summary,
       acceptanceSteps: args.acceptance_steps,
-      updateLog: args.update_log ?? true,
+      updateLog: args.update_log ?? config.defaults.updateIssueLog,
       logPath: args.log_path,
       logStatus: args.log_status,
     });
