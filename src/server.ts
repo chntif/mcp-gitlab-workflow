@@ -81,6 +81,15 @@ function textResult(data: Record<string, unknown>) {
   };
 }
 
+function envBackedDescription(description: string, envVarName: string, extra?: string): string {
+  const suffix =
+    ` Omit this field unless the user explicitly provided a value. ` +
+    `When omitted, the current runtime config value is used (${envVarName} overrides the built-in default when configured). ` +
+    `If the runtime config is still unset, the tool returns a missing-parameter error. ` +
+    `Do not infer or auto-generate this value.`;
+  return extra ? `${description}${suffix} ${extra}` : `${description}${suffix}`;
+}
+
 
 function getTodayDateString(): string {
   return new Date().toISOString().slice(0, 10);
@@ -1454,22 +1463,36 @@ server.registerTool(
         .int()
         .positive()
         .optional()
-        .describe("Issue project ID. If omitted, env WORKFLOW_ISSUE_PROJECT_ID is used."),
-      issue_project_path: z.string().optional().describe("Issue project path for issue template variables."),
+        .describe(envBackedDescription("Issue project ID.", "WORKFLOW_ISSUE_PROJECT_ID")),
+      issue_project_path: z
+        .string()
+        .optional()
+        .describe(
+          envBackedDescription("Issue project path for issue template variables.", "WORKFLOW_ISSUE_PROJECT_PATH"),
+        ),
       code_project_id: z
         .number()
         .int()
         .positive()
         .optional()
-        .describe("Optional code project ID used in issue template variables."),
-      code_project_path: z.string().optional().describe("Code project path for template/render context."),
+        .describe(envBackedDescription("Optional code project ID used in issue template variables.", "WORKFLOW_CODE_PROJECT_ID")),
+      code_project_path: z
+        .string()
+        .optional()
+        .describe(envBackedDescription("Code project path for template/render context.", "WORKFLOW_CODE_PROJECT_PATH")),
       labels: z.array(z.string()).optional().describe("Issue labels list."),
-      label: z.string().optional().describe("Issue title prefix label and fallback issue label."),
+      label: z
+        .string()
+        .optional()
+        .describe(envBackedDescription("Issue title prefix label and fallback issue label.", "WORKFLOW_LABEL")),
       auto_create_labels: z
         .boolean()
         .optional()
         .describe("When true, create missing labels in issue project automatically."),
-      assignee_username: z.string().optional().describe("Single assignee username."),
+      assignee_username: z
+        .string()
+        .optional()
+        .describe(envBackedDescription("Single assignee username.", "WORKFLOW_ASSIGNEE_USERNAME")),
       assignee_usernames: z.array(z.string()).optional().describe("Assignee usernames list."),
       assign_to_current_user_if_missing: z
         .boolean()
@@ -1516,9 +1539,9 @@ server.registerTool(
       codeProjectId,
       codeProjectPath,
       labels: args.labels,
-      label: args.label,
+      label: optionalStringParam(args.label, config.defaults.label),
       autoCreateLabels: args.auto_create_labels,
-      assigneeUsername: args.assignee_username,
+      assigneeUsername: optionalStringParam(args.assignee_username, config.defaults.assigneeUsername),
       assigneeUsernames: args.assignee_usernames,
       assignToCurrentUserIfMissing: args.assign_to_current_user_if_missing,
     });
@@ -1547,19 +1570,25 @@ server.registerTool(
         .int()
         .positive()
         .optional()
-        .describe("Issue project ID. If omitted, env WORKFLOW_ISSUE_PROJECT_ID is used."),
-      issue_project_path: z.string().optional().describe("Issue project path."),
+        .describe(envBackedDescription("Issue project ID.", "WORKFLOW_ISSUE_PROJECT_ID")),
+      issue_project_path: z
+        .string()
+        .optional()
+        .describe(envBackedDescription("Issue project path.", "WORKFLOW_ISSUE_PROJECT_PATH")),
       code_project_id: z
         .number()
         .int()
         .positive()
         .optional()
-        .describe("Code project ID. If omitted, env WORKFLOW_CODE_PROJECT_ID is used."),
-      code_project_path: z.string().optional().describe("Code project path."),
+        .describe(envBackedDescription("Code project ID.", "WORKFLOW_CODE_PROJECT_ID")),
+      code_project_path: z
+        .string()
+        .optional()
+        .describe(envBackedDescription("Code project path.", "WORKFLOW_CODE_PROJECT_PATH")),
       log_path: z
         .string()
         .optional()
-        .describe("Issue log path. If omitted, env WORKFLOW_ISSUE_LOG_PATH is used."),
+        .describe(envBackedDescription("Issue log path.", "WORKFLOW_ISSUE_LOG_PATH")),
     },
   },
   withToolErrorHandling("workflow_issue_log_append", async (args) => {
@@ -1620,7 +1649,7 @@ server.registerTool(
         .int()
         .positive()
         .optional()
-        .describe("Code project ID. If omitted, env WORKFLOW_CODE_PROJECT_ID is used."),
+        .describe(envBackedDescription("Code project ID.", "WORKFLOW_CODE_PROJECT_ID")),
       mr_iid: z.number().int().positive().describe("Merge request IID."),
       review_comment_body: z
         .string()
@@ -1735,15 +1764,15 @@ server.registerTool(
       repo_path: z
         .string()
         .optional()
-        .describe("Local repository path. If omitted, env WORKFLOW_LOCAL_REPO_PATH is used."),
+        .describe(envBackedDescription("Local repository path.", "WORKFLOW_LOCAL_REPO_PATH")),
       remote_name: z
         .string()
         .optional()
-        .describe("Git remote name. If omitted, env WORKFLOW_LOCAL_REMOTE_NAME is used."),
+        .describe(envBackedDescription("Git remote name.", "WORKFLOW_LOCAL_REMOTE_NAME")),
       base_branch: z
         .string()
         .optional()
-        .describe("Optional base branch to pull before checkout. If omitted, env WORKFLOW_BASE_BRANCH is used."),
+        .describe(envBackedDescription("Optional base branch to pull before checkout.", "WORKFLOW_BASE_BRANCH")),
     },
   },
   withToolErrorHandling("workflow_sync_local_branch", async (args) => {
@@ -1784,24 +1813,30 @@ server.registerTool(
         .int()
         .positive()
         .optional()
-        .describe("Issue project ID. If omitted, env WORKFLOW_ISSUE_PROJECT_ID is used."),
-      issue_project_path: z.string().optional().describe("Issue project path."),
+        .describe(envBackedDescription("Issue project ID.", "WORKFLOW_ISSUE_PROJECT_ID")),
+      issue_project_path: z
+        .string()
+        .optional()
+        .describe(envBackedDescription("Issue project path.", "WORKFLOW_ISSUE_PROJECT_PATH")),
       issue_iid: z.number().int().positive().describe("Issue IID."),
       code_project_id: z
         .number()
         .int()
         .positive()
         .optional()
-        .describe("Code project ID. If omitted, env WORKFLOW_CODE_PROJECT_ID is used."),
-      code_project_path: z.string().optional().describe("Code project path."),
+        .describe(envBackedDescription("Code project ID.", "WORKFLOW_CODE_PROJECT_ID")),
+      code_project_path: z
+        .string()
+        .optional()
+        .describe(envBackedDescription("Code project path.", "WORKFLOW_CODE_PROJECT_PATH")),
       base_branch: z
         .string()
         .optional()
-        .describe("Base branch used for creating new branch. If omitted, env WORKFLOW_BASE_BRANCH is used."),
+        .describe(envBackedDescription("Base branch used for creating new branch.", "WORKFLOW_BASE_BRANCH")),
       target_branch: z
         .string()
         .optional()
-        .describe("MR target branch. If omitted, env WORKFLOW_TARGET_BRANCH is used."),
+        .describe(envBackedDescription("MR target branch.", "WORKFLOW_TARGET_BRANCH")),
       branch_name: z.string().optional().describe("Optional branch name override."),
       english_slug: z.string().optional().describe("Optional English slug used when generating branch name."),
       work_type: z.enum(["feat", "fix", "chore"]).optional().describe("Optional work type override."),
@@ -1810,8 +1845,14 @@ server.registerTool(
       commit_actions: z.array(commitActionSchema).optional().describe("Commit actions list."),
       change_summary: z.string().min(1).describe("Change summary used in MR description and issue log."),
       test_plan: z.string().min(1).describe("Test/acceptance plan used in MR description."),
-      label: z.string().optional().describe("Optional MR label."),
-      assignee_username: z.string().optional().describe("Optional assignee username for MR."),
+      label: z
+        .string()
+        .optional()
+        .describe(envBackedDescription("Optional MR label.", "WORKFLOW_LABEL")),
+      assignee_username: z
+        .string()
+        .optional()
+        .describe(envBackedDescription("Optional assignee username for MR.", "WORKFLOW_ASSIGNEE_USERNAME")),
       review_comment_body: z.string().optional().describe("Direct MR review comment body."),
       review_summary: z.string().optional().describe("Review summary used when generating review comment."),
       include_changes_in_review: z
@@ -1834,11 +1875,11 @@ server.registerTool(
       local_repo_path: z
         .string()
         .optional()
-        .describe("Local repository path. If omitted, env WORKFLOW_LOCAL_REPO_PATH is used."),
+        .describe(envBackedDescription("Local repository path.", "WORKFLOW_LOCAL_REPO_PATH")),
       local_remote_name: z
         .string()
         .optional()
-        .describe("Git remote name. If omitted, env WORKFLOW_LOCAL_REMOTE_NAME is used."),
+        .describe(envBackedDescription("Git remote name.", "WORKFLOW_LOCAL_REMOTE_NAME")),
       issue_comment_body: z.string().optional().describe("Direct issue comment body."),
       implementation_summary: z
         .string()
@@ -1852,7 +1893,13 @@ server.registerTool(
       log_path: z
         .string()
         .optional()
-        .describe("Issue log path. If omitted and update_log=true, env WORKFLOW_ISSUE_LOG_PATH is used."),
+        .describe(
+          envBackedDescription(
+            "Issue log path.",
+            "WORKFLOW_ISSUE_LOG_PATH",
+            "This field matters only when update_log=true.",
+          ),
+        ),
       log_status: z.string().optional().describe("Issue log status text."),
     },
   },
@@ -1918,8 +1965,8 @@ server.registerTool(
       commitActions,
       changeSummary: args.change_summary,
       testPlan: args.test_plan,
-      label: args.label?.trim(),
-      assigneeUsername: args.assignee_username?.trim(),
+      label: optionalStringParam(args.label, config.defaults.label),
+      assigneeUsername: optionalStringParam(args.assignee_username, config.defaults.assigneeUsername),
       reviewCommentBody: args.review_comment_body,
       reviewSummary: args.review_summary,
       includeChangesInReview: args.include_changes_in_review,
@@ -1969,22 +2016,34 @@ server.registerTool(
         .int()
         .positive()
         .optional()
-        .describe("Issue project ID. If omitted, env WORKFLOW_ISSUE_PROJECT_ID is used."),
-      issue_project_path: z.string().optional().describe("Issue project path."),
+        .describe(envBackedDescription("Issue project ID.", "WORKFLOW_ISSUE_PROJECT_ID")),
+      issue_project_path: z
+        .string()
+        .optional()
+        .describe(envBackedDescription("Issue project path.", "WORKFLOW_ISSUE_PROJECT_PATH")),
       code_project_id: z
         .number()
         .int()
         .positive()
         .optional()
-        .describe("Code project ID. If omitted, env WORKFLOW_CODE_PROJECT_ID is used."),
-      code_project_path: z.string().optional().describe("Code project path."),
+        .describe(envBackedDescription("Code project ID.", "WORKFLOW_CODE_PROJECT_ID")),
+      code_project_path: z
+        .string()
+        .optional()
+        .describe(envBackedDescription("Code project path.", "WORKFLOW_CODE_PROJECT_PATH")),
       labels: z.array(z.string()).optional().describe("Issue labels list."),
-      label: z.string().optional().describe("Issue title prefix and fallback issue label."),
+      label: z
+        .string()
+        .optional()
+        .describe(envBackedDescription("Issue title prefix and fallback issue label.", "WORKFLOW_LABEL")),
       auto_create_labels: z
         .boolean()
         .optional()
         .describe("Whether to auto-create missing labels."),
-      assignee_username: z.string().optional().describe("Single assignee username."),
+      assignee_username: z
+        .string()
+        .optional()
+        .describe(envBackedDescription("Single assignee username.", "WORKFLOW_ASSIGNEE_USERNAME")),
       assignee_usernames: z.array(z.string()).optional().describe("Assignee usernames list."),
       assign_to_current_user_if_missing: z
         .boolean()
@@ -1993,11 +2052,11 @@ server.registerTool(
       base_branch: z
         .string()
         .optional()
-        .describe("Base branch for creating code branch. If omitted, env WORKFLOW_BASE_BRANCH is used."),
+        .describe(envBackedDescription("Base branch for creating code branch.", "WORKFLOW_BASE_BRANCH")),
       target_branch: z
         .string()
         .optional()
-        .describe("MR target branch. If omitted, env WORKFLOW_TARGET_BRANCH is used."),
+        .describe(envBackedDescription("MR target branch.", "WORKFLOW_TARGET_BRANCH")),
       branch_name: z.string().optional().describe("Optional branch name override."),
       commit_message: z.string().optional().describe("Optional commit message."),
       commit_actions: z.array(commitActionSchema).optional().describe("Commit actions list."),
@@ -2022,11 +2081,11 @@ server.registerTool(
       local_repo_path: z
         .string()
         .optional()
-        .describe("Local repository path. If omitted, env WORKFLOW_LOCAL_REPO_PATH is used."),
+        .describe(envBackedDescription("Local repository path.", "WORKFLOW_LOCAL_REPO_PATH")),
       local_remote_name: z
         .string()
         .optional()
-        .describe("Git remote name. If omitted, env WORKFLOW_LOCAL_REMOTE_NAME is used."),
+        .describe(envBackedDescription("Git remote name.", "WORKFLOW_LOCAL_REMOTE_NAME")),
       issue_comment_body: z.string().optional().describe("Direct issue comment body."),
       implementation_summary: z
         .string()
@@ -2037,7 +2096,13 @@ server.registerTool(
       log_path: z
         .string()
         .optional()
-        .describe("Issue log path. If omitted and update_log=true, env WORKFLOW_ISSUE_LOG_PATH is used."),
+        .describe(
+          envBackedDescription(
+            "Issue log path.",
+            "WORKFLOW_ISSUE_LOG_PATH",
+            "This field matters only when update_log=true.",
+          ),
+        ),
       log_status: z.string().optional().describe("Issue log status text."),
     },
   },
@@ -2080,9 +2145,9 @@ server.registerTool(
       codeProjectId,
       codeProjectPath,
       labels: args.labels,
-      label: args.label,
+      label: optionalStringParam(args.label, config.defaults.label),
       autoCreateLabels: args.auto_create_labels,
-      assigneeUsername: args.assignee_username,
+      assigneeUsername: optionalStringParam(args.assignee_username, config.defaults.assigneeUsername),
       assigneeUsernames: args.assignee_usernames,
       assignToCurrentUserIfMissing: args.assign_to_current_user_if_missing,
     });
@@ -2132,8 +2197,8 @@ server.registerTool(
       commitActions,
       changeSummary: args.change_summary,
       testPlan: args.test_plan,
-      label: args.label?.trim(),
-      assigneeUsername: args.assignee_username?.trim(),
+      label: optionalStringParam(args.label, config.defaults.label),
+      assigneeUsername: optionalStringParam(args.assignee_username, config.defaults.assigneeUsername),
       reviewCommentBody: args.review_comment_body,
       reviewSummary: args.review_summary,
       includeChangesInReview: args.include_changes_in_review,
@@ -2631,7 +2696,12 @@ server.registerTool(
       local_repo_path: z
         .string()
         .optional()
-        .describe("Optional local repo path used to detect current branch when branch_name is missing."),
+        .describe(
+          envBackedDescription(
+            "Optional local repo path used to detect current branch when branch_name is missing.",
+            "WORKFLOW_LOCAL_REPO_PATH",
+          ),
+        ),
       include_issue_context: z
         .boolean()
         .optional()
