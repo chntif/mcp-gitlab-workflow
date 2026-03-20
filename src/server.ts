@@ -82,6 +82,28 @@ function textResult(data: Record<string, unknown>) {
   };
 }
 
+type ToolImageContent = {
+  type: "image";
+  data: string;
+  mimeType: string;
+};
+
+function contentResult(
+  data: Record<string, unknown>,
+  extraContent: ToolImageContent[] = [],
+) {
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: JSON.stringify(data, null, 2),
+      },
+      ...extraContent,
+    ],
+    structuredContent: data,
+  };
+}
+
 function envBackedDescription(description: string, envVarName: string, extra?: string): string {
   const suffix =
     ` Omit this field unless the user explicitly provided a value. ` +
@@ -603,6 +625,27 @@ function extractImageReferences(markdownOrHtml: string): ParsedImageRef[] {
   }
 
   return results;
+}
+
+async function issueContainsImageReferences(projectId: number, issueIid: number): Promise<boolean> {
+  const issue = await gitlab.getIssue(projectId, issueIid);
+  const issueDescription = typeof issue.description === "string" ? issue.description : "";
+  if (extractImageReferences(issueDescription).length > 0) {
+    return true;
+  }
+
+  const notes = await gitlab.getIssueNotes(projectId, issueIid, {
+    sort: "asc",
+    orderBy: "created_at",
+  });
+  for (const note of notes as any[]) {
+    const body = typeof note?.body === "string" ? note.body : "";
+    if (extractImageReferences(body).length > 0) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 const DEFAULT_LABEL_COLOR_MAP: Record<string, string> = {
@@ -1438,7 +1481,7 @@ server.registerTool(
   "workflow_requirement_to_issue",
   {
     description:
-      "Use when requirement text should only create a GitLab issue. This tool does not create branch/commit/MR.",
+      "Use when requirement text should only create a GitLab issue and stop there. Do not combine this with workflow_requirement_to_delivery for the same user request. If the issue is already created, continue with workflow_issue_to_delivery instead of calling this tool again.",
     outputSchema: workflowAnalyzeAndCreateIssueOutputSchema,
     inputSchema: {
       requirement_text: z.string().min(1).describe("Raw user requirement text."),
@@ -1866,7 +1909,7 @@ server.registerTool(
   "workflow_issue_to_delivery",
   {
     description:
-      "Use when an existing issue_iid should be delivered end-to-end: branch, commit, MR, MR review comment, issue comment, local sync, and issue log.",
+      "Use when an existing issue_iid should be delivered end-to-end: branch, commit, MR, MR review comment, issue comment, local sync, and issue log. Before composing commit_actions, inspect the issue text and any screenshots. If the issue may contain image references, call gitlab_get_issue_images(project_id, issue_iid, include_base64=true) first and review the returned image blocks. Do not call this twice for the same issue or same user request. If the issue and MR may already exist, inspect GitLab first before retrying.",
     outputSchema: workflowIssueToMrFullOutputSchema,
     inputSchema: {
       issue_project_id: z
@@ -1880,6 +1923,12 @@ server.registerTool(
         .optional()
         .describe(envBackedDescription("Issue project path.", "WORKFLOW_ISSUE_PROJECT_PATH")),
       issue_iid: z.number().int().positive().describe("Issue IID."),
+      issue_images_reviewed: z
+        .boolean()
+        .optional()
+        .describe(
+          "Set to true only after you have inspected issue images with gitlab_get_issue_images(..., include_base64=true). Required when the target issue contains screenshots or image references.",
+        ),
       code_project_id: z
         .number()
         .int()
@@ -1991,6 +2040,15 @@ server.registerTool(
     );
     enforceProjectLocks("workflow_issue_to_delivery", issueProjectId, codeProjectId);
 
+    if (args.issue_images_reviewed !== true) {
+      const hasIssueImages = await issueContainsImageReferences(issueProjectId, args.issue_iid);
+      if (hasIssueImages) {
+        throw new ToolInputError(
+          `[workflow_issue_to_delivery] Issue ${issueProjectId}#${args.issue_iid} contains image references. Before generating commit_actions, call gitlab_get_issue_images with include_base64=true, inspect the returned image content blocks, then call workflow_issue_to_delivery again with issue_images_reviewed=true.`,
+        );
+      }
+    }
+
     const baseBranch = requireStringParam(
       "workflow_issue_to_delivery",
       "base_branch",
@@ -2019,7 +2077,7 @@ server.registerTool(
       last_commit_id: action.last_commit_id?.trim(),
     }));
 
-    return executeIssueToMrFullWorkflow({
+    const delivery = await executeIssueToMrFullWorkflow({
       toolName: "workflow_issue_to_delivery",
       issueProjectId,
       issueProjectPath: optionalStringParam(args.issue_project_path, config.defaults.issueProjectPath),
@@ -2054,6 +2112,8 @@ server.registerTool(
       logPath: args.log_path,
       logStatus: args.log_status,
     });
+
+    return delivery;
   }),
 );
 
@@ -2061,7 +2121,7 @@ server.registerTool(
   "workflow_requirement_to_delivery",
   {
     description:
-      "Use when requirement text should run full chain: create issue first, then execute issue-to-delivery workflow.",
+      "Use when requirement text should run the full chain once: create issue first, then execute issue-to-delivery workflow. Do not combine this with workflow_requirement_to_issue or workflow_issue_to_delivery for the same user request.",
     outputSchema: workflowRequirementToDeliveryFullOutputSchema,
     inputSchema: {
       requirement_text: z.string().min(1).describe("Raw user requirement text."),
@@ -2602,7 +2662,7 @@ server.registerTool(
   "gitlab_get_issue_images",
   {
     description:
-      "Extract image references from issue description/notes, optionally downloading image base64 payloads.",
+      "Extract image references from issue description/notes. When include_base64=true, download each image, return base64 metadata, and attach MCP image content blocks so the model can inspect the image itself.",
     outputSchema: gitlabGetIssueImagesOutputSchema,
     inputSchema: {
       project_id: z.number().int().positive().optional().describe("GitLab project ID."),
@@ -2623,92 +2683,107 @@ server.registerTool(
         .describe("Maximum number of image references to return."),
     },
   },
-  withToolErrorHandling("gitlab_get_issue_images", async (args) => {
-    const projectId = requireNumberParam("gitlab_get_issue_images", "project_id", args.project_id, undefined);
-    const issueIid = requireNumberParam("gitlab_get_issue_images", "issue_iid", args.issue_iid, undefined);
-    const includeNotes = args.include_notes ?? true;
-    const includeBase64 = args.include_base64 ?? false;
-    const maxImages = ensurePositiveIntRangeOptional(
-      "gitlab_get_issue_images",
-      "max_images",
-      args.max_images,
-      200,
-    ) ?? 50;
+  async (args) => {
+    try {
+      const projectId = requireNumberParam("gitlab_get_issue_images", "project_id", args.project_id, undefined);
+      const issueIid = requireNumberParam("gitlab_get_issue_images", "issue_iid", args.issue_iid, undefined);
+      const includeNotes = args.include_notes ?? true;
+      const includeBase64 = args.include_base64 ?? false;
+      const maxImages = ensurePositiveIntRangeOptional(
+        "gitlab_get_issue_images",
+        "max_images",
+        args.max_images,
+        200,
+      ) ?? 50;
 
-    enforceIssueProjectLock("gitlab_get_issue_images", projectId);
+      enforceIssueProjectLock("gitlab_get_issue_images", projectId);
 
-    const issue = await gitlab.getIssue(projectId, issueIid);
-    const imageRows: Array<Record<string, unknown>> = [];
+      const issue = await gitlab.getIssue(projectId, issueIid);
+      const imageRows: Array<Record<string, unknown>> = [];
 
-    const issueDescription = typeof issue.description === "string" ? issue.description : "";
-    for (const imageRef of extractImageReferences(issueDescription)) {
-      imageRows.push({
-        source: "issue_description",
-        alt_text: imageRef.altText,
-        raw_url: imageRef.rawUrl,
-        resolved_url: gitlab.resolveWebUrl(imageRef.rawUrl),
-        markdown_fragment: imageRef.markdownFragment,
-      });
-    }
+      const issueDescription = typeof issue.description === "string" ? issue.description : "";
+      for (const imageRef of extractImageReferences(issueDescription)) {
+        imageRows.push({
+          source: "issue_description",
+          alt_text: imageRef.altText,
+          raw_url: imageRef.rawUrl,
+          resolved_url: gitlab.resolveProjectUploadWebUrl(projectId, imageRef.rawUrl),
+          markdown_fragment: imageRef.markdownFragment,
+        });
+      }
 
-    if (includeNotes) {
-      const notes = await gitlab.getIssueNotes(projectId, issueIid, {
-        sort: "asc",
-        orderBy: "created_at",
-      });
-      for (const note of notes as any[]) {
-        const body = typeof note?.body === "string" ? note.body : "";
-        const imageRefs = extractImageReferences(body);
-        for (const imageRef of imageRefs) {
-          imageRows.push({
-            source: "issue_note",
-            note_id: Number.isInteger(note?.id) ? note.id : undefined,
-            note_created_at:
-              typeof note?.created_at === "string" ? note.created_at : undefined,
-            alt_text: imageRef.altText,
-            raw_url: imageRef.rawUrl,
-            resolved_url: gitlab.resolveWebUrl(imageRef.rawUrl),
-            markdown_fragment: imageRef.markdownFragment,
-          });
+      if (includeNotes) {
+        const notes = await gitlab.getIssueNotes(projectId, issueIid, {
+          sort: "asc",
+          orderBy: "created_at",
+        });
+        for (const note of notes as any[]) {
+          const body = typeof note?.body === "string" ? note.body : "";
+          const imageRefs = extractImageReferences(body);
+          for (const imageRef of imageRefs) {
+            imageRows.push({
+              source: "issue_note",
+              note_id: Number.isInteger(note?.id) ? note.id : undefined,
+              note_created_at:
+                typeof note?.created_at === "string" ? note.created_at : undefined,
+              alt_text: imageRef.altText,
+              raw_url: imageRef.rawUrl,
+              resolved_url: gitlab.resolveProjectUploadWebUrl(projectId, imageRef.rawUrl),
+              markdown_fragment: imageRef.markdownFragment,
+            });
+          }
         }
       }
-    }
 
-    const dedupedRows = Array.from(
-      new Map(
-        imageRows.map((item) => [
-          `${item.source}|${item.note_id ?? 0}|${item.raw_url}|${item.markdown_fragment}`,
-          item,
-        ]),
-      ).values(),
-    ).slice(0, maxImages);
+      const dedupedRows = Array.from(
+        new Map(
+          imageRows.map((item) => [
+            `${item.source}|${item.note_id ?? 0}|${item.raw_url}|${item.markdown_fragment}`,
+            item,
+          ]),
+        ).values(),
+      ).slice(0, maxImages);
 
-    if (includeBase64) {
-      for (const imageRow of dedupedRows) {
-        const rawUrl = imageRow.raw_url;
-        if (typeof rawUrl !== "string") {
-          continue;
-        }
-        try {
-          const download = await gitlab.downloadBinaryAsBase64(rawUrl);
-          imageRow.content_type = download.content_type;
-          imageRow.size_bytes = download.size_bytes;
-          imageRow.base64 = download.base64;
-          imageRow.resolved_url = download.resolved_url;
-        } catch (error) {
-          imageRow.fetch_error =
-            error instanceof Error ? error.message : String(error);
+      const imageContentBlocks: ToolImageContent[] = [];
+      if (includeBase64) {
+        for (const imageRow of dedupedRows) {
+          const rawUrl = imageRow.raw_url;
+          if (typeof rawUrl !== "string") {
+            continue;
+          }
+          try {
+            const download = await gitlab.downloadBinaryAsBase64(rawUrl, { projectId });
+            imageRow.content_type = download.content_type;
+            imageRow.size_bytes = download.size_bytes;
+            imageRow.base64 = download.base64;
+            imageRow.resolved_url = download.resolved_url;
+
+            if (download.content_type?.startsWith("image/")) {
+              imageContentBlocks.push({
+                type: "image",
+                data: download.base64,
+                mimeType: download.content_type,
+              });
+            }
+          } catch (error) {
+            imageRow.fetch_error =
+              error instanceof Error ? error.message : String(error);
+          }
         }
       }
-    }
 
-    return {
-      issue_iid: issueIid,
-      issue_web_url: typeof issue.web_url === "string" ? issue.web_url : undefined,
-      image_count: dedupedRows.length,
-      images: dedupedRows,
-    };
-  }),
+      const payload = {
+        issue_iid: issueIid,
+        issue_web_url: typeof issue.web_url === "string" ? issue.web_url : undefined,
+        image_count: dedupedRows.length,
+        images: dedupedRows,
+      };
+
+      return contentResult(payload, imageContentBlocks);
+    } catch (error) {
+      return textResult(toErrorPayload("gitlab_get_issue_images", error));
+    }
+  },
 );
 
 server.registerTool(

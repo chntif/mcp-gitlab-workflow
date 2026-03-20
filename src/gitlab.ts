@@ -540,8 +540,25 @@ export class GitLabClient {
     return `${this.webBaseUrl}/${trimmed}`;
   }
 
-  async downloadBinaryAsBase64(urlOrPath: string): Promise<DownloadBinaryAsBase64Result> {
-    const resolvedUrl = this.resolveWebUrl(urlOrPath);
+  resolveProjectUploadWebUrl(projectId: number, urlOrPath: string): string {
+    const trimmed = urlOrPath.trim();
+    if (/^https?:\/\//i.test(trimmed)) {
+      return trimmed;
+    }
+    if (trimmed.startsWith("/uploads/")) {
+      return `${this.webBaseUrl}/-/project/${encodeURIComponent(String(projectId))}${trimmed}`;
+    }
+    return this.resolveWebUrl(trimmed);
+  }
+
+  async downloadBinaryAsBase64(
+    urlOrPath: string,
+    options?: { projectId?: number },
+  ): Promise<DownloadBinaryAsBase64Result> {
+    const resolvedUrl =
+      options?.projectId !== undefined
+        ? this.resolveProjectUploadWebUrl(options.projectId, urlOrPath)
+        : this.resolveWebUrl(urlOrPath);
     const response = await fetch(resolvedUrl, {
       method: "GET",
       headers: {
