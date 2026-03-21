@@ -1,5 +1,5 @@
 {
-  "name": "mcp-gitlab-workflow",
+  "name": "@chntif/mcp-gitlab-workflow",
   "version": "0.1.0",
   "private": false,
   "type": "module",
@@ -8,16 +8,25 @@
   "bin": {
     "mcp-gitlab-workflow": "dist/src/server.js"
   },
-  "author": "chenba <chenba@baimaohui.net>",
+  "author": "chntif <tchen1690@gmail.com>",
   "license": "MIT",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/chenba/mcp-gitlab-workflow.git"
+    "url": "git+https://github.com/chntif/mcp-gitlab-workflow.git"
   },
   "bugs": {
-    "url": "https://github.com/chenba/mcp-gitlab-workflow/issues"
+    "url": "https://github.com/chntif/mcp-gitlab-workflow/issues"
   },
-  "homepage": "https://github.com/chenba/mcp-gitlab-workflow#readme",
+  "homepage": "https://github.com/chntif/mcp-gitlab-workflow#readme",
   "keywords": [
     "mcp",
     "model-context-protocol",
@@ -29,6 +38,8 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/server.ts",
     "start": "node dist/src/server.js",
+    "lib": "rimraf dist && npm run build",
+    "pub": "npm run lib && npm publish --access public --registry https://registry.npmjs.org/ --cache .npm-cache",
     "test": "node -e \"console.log('No automated tests configured')\""
   },
   "engines": {
@@ -40,6 +51,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.11.0",
+    "rimraf": "^6.1.3",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3"
   }

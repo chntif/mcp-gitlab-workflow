@@ -1,6 +1,6 @@
 # mcp-gitlab-workflow
 
-`mcp-gitlab-workflow` 是一个面向 GitLab 的 MCP 服务，目标是让 AI Agent 通过工具调用完成完整研发流程：需求解析、Issue、分支、提交、MR、审查评论、Issue 回填、以及本地仓库分支同步。
+`mcp-gitlab-workflow` 是一个面向 GitLab 的 MCP 服务，目标是让 AI Agent 通过工具调用完成完整研发流程：需求解析、Issue、分支、提交、MR、审查评论、Issue 回填。基于你的一个需求或现有Issue自动完成规范化的功能开发，实现面向Issue开发。
 
 ## 1. 核心能力
 
@@ -23,7 +23,7 @@
 
 ## 4. 使用方式
 
-### 4.1 本地开发运行
+### 4.1 本地启动
 
 ```json
 {
@@ -40,7 +40,7 @@
 }
 ```
 
-### 4.2 MCP 客户端配置（npx） - 待上线
+### 4.2 使用NPX
 
 ```json
 {
