@@ -7,23 +7,19 @@
 - `workflow_*`：工作流编排工具，适合“直接完成任务链路”
 - `gitlab_*`：原子 API 工具，适合“自定义编排与精细控制”
 
-> 说明：`workflow_start` 与 `workflow_complete` 已在当前版本彻底移除，统一使用新工作流工具。
-
 ## 2. Workflow 工具
 
 - `workflow_requirement_to_issue`：分析需求并创建 Issue（支持标签自动建议/自动创建、默认指派给当前用户）
 - `workflow_review_mr_post_comment`：读取 MR 变更并发布审查评论，可选自动审批
-- `workflow_sync_local_branch`：本地仓库 `fetch/pull/checkout` 切换到目标分支
-- `workflow_issue_to_delivery`：基于已有 Issue 完成“建分支→提交→MR→审查评论→本地切分支→Issue 评论→Issue Log”
+- `workflow_issue_to_delivery`：基于已有 Issue 完成“建分支→提交→MR→审查评论→Issue 评论→Issue Log”
 - `workflow_requirement_to_delivery`：从需求开始的一体化全链路（先建 Issue，再走 `workflow_issue_to_delivery`）
-- `workflow_issue_log_append`：向本地 issue log 追加记录
 
 ## 3. GitLab 原子工具
 
 - 用户与标签：`gitlab_get_current_user`、`gitlab_list_labels`、`gitlab_create_label`、`gitlab_update_label`、`gitlab_delete_label`
 - Issue：`gitlab_create_issue`、`gitlab_get_issue`、`gitlab_get_issue_notes`、`gitlab_add_issue_comment`（支持基于 MR 变更自动生成评论）、`gitlab_get_issue_images`
 - 仓库：`gitlab_create_branch`、`gitlab_get_file`、`gitlab_commit_files`、`gitlab_upload_project_file`
-- MR：`gitlab_get_merge_request`、`gitlab_get_mr_notes`、`gitlab_create_merge_request`（可选 `issue_project_id` + `issue_iid` 自动写入关联 issue）、`gitlab_create_mr_note`、`gitlab_get_mr_changes`、`gitlab_approve_mr`、`gitlab_unapprove_mr`
+- MR：`gitlab_get_merge_request`、`gitlab_get_mr_notes`、`gitlab_create_merge_request`、`gitlab_create_mr_note`、`gitlab_get_mr_changes`、`gitlab_approve_mr`、`gitlab_unapprove_mr`
 
 ## 4. 使用方式
 
@@ -34,9 +30,7 @@
   "mcpServers": {
     "gitlab-workflow": {
       "command": "node",
-      "args": [
-        "/gitlab-workflow-server/dist/src/server.js"
-      ],
+      "args": ["/gitlab-workflow-server/dist/src/server.js"],
       "env": {
         "GITLAB_TOKEN": "YOUR_TOKEN",
         "GITLAB_API_BASE_URL": "https://gitlab.com/api/v4"
@@ -65,7 +59,7 @@
 
 ### 4.3 关于 `uv/uvx`
 
-本项目是 Node.js 包，推荐 `npx` 方式运行。`uv/uvx` 主要用于 Python 生态，不是本包的首选启动方式。
+本项目是 Node.js 包，推荐 `npx` 方式运行。`uv/uvx` 会在后续上传。
 
 ## 5. 环境变量
 
