@@ -1,6 +1,6 @@
 # mcp-gitlab-workflow
 
-`mcp-gitlab-workflow` 是一个面向 GitLab 的 MCP 服务，目标是让 AI Agent 通过工具调用完成完整研发流程：需求解析、Issue、分支、提交、MR、审查评论、Issue 回填。基于你的一个需求或现有Issue自动完成规范化的功能开发，实现面向Issue开发。
+`mcp-gitlab-workflow` 是一个面向 GitLab 的 MCP 服务，目标是让 AI Agent 通过工具调用完成完整研发流程：需求解析、Issue、分支、提交、MR、Issue 回填。基于你的一个需求或现有Issue自动完成规范化的功能开发，实现面向Issue开发。
 
 ## 1. 核心能力
 
@@ -11,10 +11,14 @@
 
 - `workflow_requirement_to_issue`：分析需求并创建 Issue（支持标签自动建议/自动创建、默认指派给当前用户）
 - `workflow_review_mr_post_comment`：读取 MR 变更并发布审查评论，可选自动审批
-- `workflow_issue_to_delivery`：基于已有 Issue 完成“建分支→提交→MR→审查评论→Issue 评论→Issue Log”
-- `workflow_requirement_to_delivery`：从需求开始的一体化全链路（先建 Issue，再走 `workflow_issue_to_delivery`）
+- `workflow_issue_to_delivery`：基于已有 Issue 完成“建分支→提交→MR→Issue 评论→Issue Log”
+- `workflow_requirement_to_delivery`：从需求开始的一体化全链路（先建 Issue，再在同一次调用中继续完成交付）
 
 ## 3. GitLab 原子工具
+
+- 与 workflow 工具一样，原子工具里和项目上下文相关的 `project_id` / `issue_project_id` / `code_project_id` 也支持 runtime config fallback。
+- Issue 类工具默认回落到 `WORKFLOW_ISSUE_PROJECT_ID`，代码/MR 类工具默认回落到 `WORKFLOW_CODE_PROJECT_ID`。
+- 对同时适用于任意项目的通用原子工具，如果 issue/code 两个默认项目都已配置且值不同，则仍需要显式传 `project_id`，避免歧义。
 
 - 用户与标签：`gitlab_get_current_user`、`gitlab_list_labels`、`gitlab_create_label`、`gitlab_update_label`、`gitlab_delete_label`
 - Issue：`gitlab_create_issue`、`gitlab_get_issue`、`gitlab_get_issue_notes`、`gitlab_add_issue_comment`（支持基于 MR 变更自动生成评论）、`gitlab_get_issue_images`

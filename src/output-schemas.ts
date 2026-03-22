@@ -116,13 +116,6 @@ const workflowIssueToMrFullDataSchema = z.object({
     })
     .describe("Commit result payload."),
   merge_request: mergeRequestBriefSchema.describe("Created merge request metadata."),
-  review_note: z
-    .object({
-      note_id: z.number().describe("Created MR review note ID."),
-      body: z.string().describe("Review note markdown body."),
-      web_url: z.string().nullable().describe("MR note URL when available."),
-    })
-    .describe("MR review comment result."),
   issue_comment: z
     .object({
       note_id: z.number().describe("Created issue note ID."),

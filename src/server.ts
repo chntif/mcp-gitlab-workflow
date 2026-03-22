@@ -113,6 +113,15 @@ function envBackedDescription(description: string, envVarName: string, extra?: s
   return extra ? `${description}${suffix} ${extra}` : `${description}${suffix}`;
 }
 
+function anyProjectEnvBackedDescription(description: string, extra?: string): string {
+  const suffix =
+    ` Omit this field unless the user explicitly provided a value. ` +
+    `When omitted, the tool tries the current runtime config defaults from WORKFLOW_ISSUE_PROJECT_ID or WORKFLOW_CODE_PROJECT_ID. ` +
+    `If both are unset, or both are set to different values, the tool returns a missing-parameter error and you must pass project_id explicitly. ` +
+    `Do not infer or auto-generate this value.`;
+  return extra ? `${description}${suffix} ${extra}` : `${description}${suffix}`;
+}
+
 
 function getTodayDateString(): string {
   return new Date().toISOString().slice(0, 10);
@@ -267,6 +276,64 @@ function requireStringParam(
     return valueFromEnv.trim();
   }
   return missingParam(toolName, fieldName, envVarName);
+}
+
+function requireIssueProjectIdParam(
+  toolName: string,
+  fieldName: string,
+  valueFromArgs: number | undefined,
+): number {
+  return requireNumberParam(
+    toolName,
+    fieldName,
+    valueFromArgs,
+    config.defaults.issueProjectId,
+    "WORKFLOW_ISSUE_PROJECT_ID",
+  );
+}
+
+function requireCodeProjectIdParam(
+  toolName: string,
+  fieldName: string,
+  valueFromArgs: number | undefined,
+): number {
+  return requireNumberParam(
+    toolName,
+    fieldName,
+    valueFromArgs,
+    config.defaults.codeProjectId,
+    "WORKFLOW_CODE_PROJECT_ID",
+  );
+}
+
+function requireAnyProjectIdParam(
+  toolName: string,
+  fieldName: string,
+  valueFromArgs: number | undefined,
+): number {
+  if (valueFromArgs !== undefined) {
+    return requireNumberParam(toolName, fieldName, valueFromArgs, undefined);
+  }
+
+  const issueProjectId = config.defaults.issueProjectId;
+  const codeProjectId = config.defaults.codeProjectId;
+  if (
+    issueProjectId !== undefined &&
+    codeProjectId !== undefined &&
+    issueProjectId !== codeProjectId
+  ) {
+    throw new ToolInputError(
+      `[${toolName}] Missing required parameter '${fieldName}'. Runtime config is ambiguous because WORKFLOW_ISSUE_PROJECT_ID=${issueProjectId} and WORKFLOW_CODE_PROJECT_ID=${codeProjectId}. Provide '${fieldName}' explicitly.`,
+    );
+  }
+
+  return requireNumberParam(
+    toolName,
+    fieldName,
+    undefined,
+    issueProjectId ?? codeProjectId,
+    "WORKFLOW_ISSUE_PROJECT_ID/WORKFLOW_CODE_PROJECT_ID",
+  );
 }
 
 function optionalStringParam(
@@ -1223,12 +1290,6 @@ async function executeIssueToMrFullWorkflow(params: {
   testPlan: string;
   label?: string;
   assigneeUsername?: string;
-  reviewCommentBody?: string;
-  reviewSummary?: string;
-  includeChangesInReview?: boolean;
-  includeExistingNotesInReview?: boolean;
-  approveMr?: boolean;
-  approveSha?: string;
   checkoutLocalBranch?: boolean;
   localRepoPath?: string;
   localRemoteName?: string;
@@ -1285,45 +1346,9 @@ async function executeIssueToMrFullWorkflow(params: {
     assigneeUsername: params.assigneeUsername,
   });
 
-  const includeChangesInReview = params.includeChangesInReview ?? true;
-  const includeExistingNotesInReview = params.includeExistingNotesInReview ?? false;
-
-  let changedFiles: string[] = params.commitActions
+  const changedFiles: string[] = [...new Set(params.commitActions
     .map((action) => action.file_path?.trim())
-    .filter((path): path is string => Boolean(path));
-
-  if (includeChangesInReview) {
-    const changes = await gitlab.getMergeRequestChanges(params.codeProjectId, mr.iid);
-    const changedByMr = ((changes?.changes ?? []) as any[])
-      .map((item) => (typeof item?.new_path === "string" ? item.new_path : item?.old_path))
-      .filter((path): path is string => typeof path === "string");
-    if (changedByMr.length > 0) {
-      changedFiles = changedByMr;
-    }
-  }
-  changedFiles = [...new Set(changedFiles)];
-
-  let existingNotesCount: number | undefined;
-  if (includeExistingNotesInReview) {
-    const notes = await gitlab.getMergeRequestNotes(params.codeProjectId, mr.iid, {
-      sort: "asc",
-      orderBy: "created_at",
-    });
-    existingNotesCount = (notes as any[]).length;
-  }
-
-  const reviewBody =
-    params.reviewCommentBody?.trim() ||
-    buildDefaultReviewComment({
-      summary: params.reviewSummary,
-      changedFiles,
-      existingNotesCount,
-    });
-  const reviewNote = await gitlab.createMergeRequestNote(params.codeProjectId, mr.iid, reviewBody);
-
-  if (params.approveMr) {
-    await gitlab.approveMergeRequest(params.codeProjectId, mr.iid, params.approveSha?.trim());
-  }
+    .filter((path): path is string => Boolean(path)))];
 
   const issueCommentBody =
     params.issueCommentBody?.trim() ||
@@ -1429,11 +1454,6 @@ async function executeIssueToMrFullWorkflow(params: {
       iid: mr.iid,
       title: typeof mr.title === "string" ? mr.title : String(mr.title ?? ""),
       web_url: typeof mr.web_url === "string" ? mr.web_url : "",
-    },
-    review_note: {
-      note_id: reviewNote.id,
-      body: reviewBody,
-      web_url: reviewNote?.noteable_url ?? null,
     },
     issue_comment: {
       note_id: issueComment.id,
@@ -1909,7 +1929,7 @@ server.registerTool(
   "workflow_issue_to_delivery",
   {
     description:
-      "Use when an existing issue_iid should be delivered end-to-end: branch, commit, MR, MR review comment, issue comment, local sync, and issue log. Before composing commit_actions, inspect the issue text and any screenshots. If the issue may contain image references, call gitlab_get_issue_images(project_id, issue_iid, include_base64=true) first and review the returned image blocks. Do not call this twice for the same issue or same user request. If the issue and MR may already exist, inspect GitLab first before retrying.",
+      "Use when an existing issue_iid should be delivered end-to-end: branch, commit, MR, issue comment, local sync, and issue log. Before composing commit_actions, inspect the issue text and any screenshots. If the issue may contain image references, call gitlab_get_issue_images(project_id, issue_iid, include_base64=true) first and review the returned image blocks. Do not call this twice for the same issue or same user request. If the issue and MR may already exist, inspect GitLab first before retrying.",
     outputSchema: workflowIssueToMrFullOutputSchema,
     inputSchema: {
       issue_project_id: z
@@ -1963,21 +1983,6 @@ server.registerTool(
         .string()
         .optional()
         .describe(envBackedDescription("Optional assignee username for MR.", "WORKFLOW_ASSIGNEE_USERNAME")),
-      review_comment_body: z.string().optional().describe("Direct MR review comment body."),
-      review_summary: z.string().optional().describe("Review summary used when generating review comment."),
-      include_changes_in_review: z
-        .boolean()
-        .optional()
-        .describe("Whether to include changed files in generated review comment."),
-      include_existing_notes_in_review: z
-        .boolean()
-        .optional()
-        .describe("Whether to include existing MR note count in generated review comment."),
-      approve_mr: z.boolean().optional().describe("Whether to approve MR after review comment."),
-      approve_sha: z
-        .string()
-        .optional()
-        .describe("Optional expected MR HEAD SHA when approve_mr=true."),
       checkout_local_branch: z
         .boolean()
         .optional()
@@ -2096,12 +2101,6 @@ server.registerTool(
       testPlan: args.test_plan,
       label: optionalStringParam(args.label, config.defaults.label),
       assigneeUsername: optionalStringParam(args.assignee_username, config.defaults.assigneeUsername),
-      reviewCommentBody: args.review_comment_body,
-      reviewSummary: args.review_summary,
-      includeChangesInReview: args.include_changes_in_review,
-      includeExistingNotesInReview: args.include_existing_notes_in_review,
-      approveMr: args.approve_mr,
-      approveSha: args.approve_sha,
       checkoutLocalBranch: args.checkout_local_branch ?? config.defaults.checkoutLocalBranch,
       localRepoPath: args.local_repo_path,
       localRemoteName: args.local_remote_name,
@@ -2121,7 +2120,7 @@ server.registerTool(
   "workflow_requirement_to_delivery",
   {
     description:
-      "Use when requirement text should run the full chain once: create issue first, then execute issue-to-delivery workflow. Do not combine this with workflow_requirement_to_issue or workflow_issue_to_delivery for the same user request.",
+      "Use when requirement text should run the full chain once: create issue, then continue in the same workflow through branch, commit, MR, issue comment, local sync, and issue log. Do not combine this with workflow_requirement_to_issue or workflow_issue_to_delivery for the same user request.",
     outputSchema: workflowRequirementToDeliveryFullOutputSchema,
     inputSchema: {
       requirement_text: z.string().min(1).describe("Raw user requirement text."),
@@ -2192,19 +2191,7 @@ server.registerTool(
       commit_message: z.string().optional().describe("Optional commit message."),
       commit_actions: z.array(commitActionSchema).optional().describe("Commit actions list."),
       change_summary: z.string().min(1).describe("Change summary used in MR/log."),
-      test_plan: z.string().min(1).describe("Test/acceptance plan used in MR/comment."),
-      review_comment_body: z.string().optional().describe("Direct MR review comment body."),
-      review_summary: z.string().optional().describe("Review summary for generated MR review comment."),
-      include_changes_in_review: z
-        .boolean()
-        .optional()
-        .describe("Whether to include changed files in generated review comment."),
-      include_existing_notes_in_review: z
-        .boolean()
-        .optional()
-        .describe("Whether to include existing MR note count in generated review comment."),
-      approve_mr: z.boolean().optional().describe("Whether to approve MR after review comment."),
-      approve_sha: z.string().optional().describe("Optional expected MR HEAD SHA when approve_mr=true."),
+      test_plan: z.string().min(1).describe("Test/acceptance plan used in MR description and issue comment."),
       checkout_local_branch: z
         .boolean()
         .optional()
@@ -2340,12 +2327,6 @@ server.registerTool(
       testPlan: args.test_plan,
       label: optionalStringParam(args.label, config.defaults.label),
       assigneeUsername: optionalStringParam(args.assignee_username, config.defaults.assigneeUsername),
-      reviewCommentBody: args.review_comment_body,
-      reviewSummary: args.review_summary,
-      includeChangesInReview: args.include_changes_in_review,
-      includeExistingNotesInReview: args.include_existing_notes_in_review,
-      approveMr: args.approve_mr,
-      approveSha: args.approve_sha,
       checkoutLocalBranch: args.checkout_local_branch ?? config.defaults.checkoutLocalBranch,
       localRepoPath: args.local_repo_path,
       localRemoteName: args.local_remote_name,
@@ -2383,7 +2364,7 @@ server.registerTool(
     description: "List labels of a GitLab project (/projects/:id/labels).",
     outputSchema: gitlabListLabelsOutputSchema,
     inputSchema: {
-      project_id: z.number().int().positive().optional().describe("GitLab project ID."),
+      project_id: z.number().int().positive().optional().describe(anyProjectEnvBackedDescription("GitLab project ID.")),
       search: z.string().optional().describe("Search text for label name/description."),
       page: z.number().int().positive().optional().describe("Page number."),
       per_page: z.number().int().positive().optional().describe("Items per page."),
@@ -2395,7 +2376,7 @@ server.registerTool(
     },
   },
   withToolErrorHandling("gitlab_list_labels", async (args) => {
-    const projectId = requireNumberParam("gitlab_list_labels", "project_id", args.project_id, undefined);
+    const projectId = requireAnyProjectIdParam("gitlab_list_labels", "project_id", args.project_id);
     enforceAnyLockedProject("gitlab_list_labels", projectId);
     const page = ensurePositiveIntOptional("gitlab_list_labels", "page", args.page);
     const perPage = ensurePositiveIntOptional("gitlab_list_labels", "per_page", args.per_page);
@@ -2415,7 +2396,7 @@ server.registerTool(
     description: "Create a project label (/projects/:id/labels).",
     outputSchema: gitlabCreateLabelOutputSchema,
     inputSchema: {
-      project_id: z.number().int().positive().optional().describe("GitLab project ID."),
+      project_id: z.number().int().positive().optional().describe(anyProjectEnvBackedDescription("GitLab project ID.")),
       name: z.string().optional().describe("Label name."),
       color: z.string().optional().describe("Label color, e.g. #FF8800."),
       description: z.string().optional().describe("Label description."),
@@ -2423,7 +2404,7 @@ server.registerTool(
     },
   },
   withToolErrorHandling("gitlab_create_label", async (args) => {
-    const projectId = requireNumberParam("gitlab_create_label", "project_id", args.project_id, undefined);
+    const projectId = requireAnyProjectIdParam("gitlab_create_label", "project_id", args.project_id);
     const name = requireStringParam("gitlab_create_label", "name", args.name, undefined);
     const color = ensureHexColor(
       "gitlab_create_label",
@@ -2448,7 +2429,7 @@ server.registerTool(
     description: "Update a project label (/projects/:id/labels).",
     outputSchema: gitlabUpdateLabelOutputSchema,
     inputSchema: {
-      project_id: z.number().int().positive().optional().describe("GitLab project ID."),
+      project_id: z.number().int().positive().optional().describe(anyProjectEnvBackedDescription("GitLab project ID.")),
       name: z.string().optional().describe("Existing label name."),
       new_name: z.string().optional().describe("New label name."),
       color: z.string().optional().describe("New color, e.g. #00AAFF."),
@@ -2457,7 +2438,7 @@ server.registerTool(
     },
   },
   withToolErrorHandling("gitlab_update_label", async (args) => {
-    const projectId = requireNumberParam("gitlab_update_label", "project_id", args.project_id, undefined);
+    const projectId = requireAnyProjectIdParam("gitlab_update_label", "project_id", args.project_id);
     const name = requireStringParam("gitlab_update_label", "name", args.name, undefined);
     const priority = ensurePositiveIntOptional("gitlab_update_label", "priority", args.priority);
     const color = args.color
@@ -2488,12 +2469,12 @@ server.registerTool(
     description: "Delete a project label (/projects/:id/labels/:label_id).",
     outputSchema: gitlabDeleteLabelOutputSchema,
     inputSchema: {
-      project_id: z.number().int().positive().optional().describe("GitLab project ID."),
+      project_id: z.number().int().positive().optional().describe(anyProjectEnvBackedDescription("GitLab project ID.")),
       label_name: z.string().optional().describe("Label name to delete."),
     },
   },
   withToolErrorHandling("gitlab_delete_label", async (args) => {
-    const projectId = requireNumberParam("gitlab_delete_label", "project_id", args.project_id, undefined);
+    const projectId = requireAnyProjectIdParam("gitlab_delete_label", "project_id", args.project_id);
     const labelName = requireStringParam("gitlab_delete_label", "label_name", args.label_name, undefined);
     enforceAnyLockedProject("gitlab_delete_label", projectId);
     await gitlab.deleteLabel(projectId, labelName);
@@ -2511,7 +2492,12 @@ server.registerTool(
     description: "Create an issue with GitLab REST API /projects/:id/issues.",
     outputSchema: gitlabCreateIssueOutputSchema,
     inputSchema: {
-      project_id: z.number().int().positive().optional().describe("GitLab project ID."),
+      project_id: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(envBackedDescription("GitLab project ID.", "WORKFLOW_ISSUE_PROJECT_ID")),
       title: z.string().optional().describe("Issue title."),
       description: z.string().optional().describe("Issue description markdown."),
       labels: z.array(z.string()).optional().describe("Issue labels array."),
@@ -2531,7 +2517,7 @@ server.registerTool(
     },
   },
   withToolErrorHandling("gitlab_create_issue", async (args) => {
-    const projectId = requireNumberParam("gitlab_create_issue", "project_id", args.project_id, undefined);
+    const projectId = requireIssueProjectIdParam("gitlab_create_issue", "project_id", args.project_id);
     enforceIssueProjectLock("gitlab_create_issue", projectId);
     const title = requireStringParam("gitlab_create_issue", "title", args.title, undefined);
     const dueDate = ensureIsoDate("gitlab_create_issue", "due_date", args.due_date);
@@ -2562,12 +2548,17 @@ server.registerTool(
     description: "Get merge request detail (/projects/:id/merge_requests/:mr_iid).",
     outputSchema: gitlabGetMergeRequestOutputSchema,
     inputSchema: {
-      project_id: z.number().int().positive().optional().describe("GitLab project ID."),
+      project_id: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(envBackedDescription("GitLab project ID.", "WORKFLOW_CODE_PROJECT_ID")),
       mr_iid: z.number().int().positive().optional().describe("Merge request IID."),
     },
   },
   withToolErrorHandling("gitlab_get_merge_request", async (args) => {
-    const projectId = requireNumberParam("gitlab_get_merge_request", "project_id", args.project_id, undefined);
+    const projectId = requireCodeProjectIdParam("gitlab_get_merge_request", "project_id", args.project_id);
     const mrIid = requireNumberParam("gitlab_get_merge_request", "mr_iid", args.mr_iid, undefined);
     enforceCodeProjectLock("gitlab_get_merge_request", projectId);
     return gitlab.getMergeRequest(projectId, mrIid);
@@ -2580,7 +2571,12 @@ server.registerTool(
     description: "Get merge request notes/comments (/projects/:id/merge_requests/:mr_iid/notes).",
     outputSchema: gitlabGetMrNotesOutputSchema,
     inputSchema: {
-      project_id: z.number().int().positive().optional().describe("GitLab project ID."),
+      project_id: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(envBackedDescription("GitLab project ID.", "WORKFLOW_CODE_PROJECT_ID")),
       mr_iid: z.number().int().positive().optional().describe("Merge request IID."),
       sort: z.enum(["asc", "desc"]).optional().describe("Sort order."),
       order_by: z
@@ -2590,7 +2586,7 @@ server.registerTool(
     },
   },
   withToolErrorHandling("gitlab_get_mr_notes", async (args) => {
-    const projectId = requireNumberParam("gitlab_get_mr_notes", "project_id", args.project_id, undefined);
+    const projectId = requireCodeProjectIdParam("gitlab_get_mr_notes", "project_id", args.project_id);
     const mrIid = requireNumberParam("gitlab_get_mr_notes", "mr_iid", args.mr_iid, undefined);
     enforceCodeProjectLock("gitlab_get_mr_notes", projectId);
     return gitlab.getMergeRequestNotes(projectId, mrIid, {
@@ -2606,12 +2602,17 @@ server.registerTool(
     description: "Get one issue by project_id + issue_iid.",
     outputSchema: gitlabGetIssueOutputSchema,
     inputSchema: {
-      project_id: z.number().int().positive().optional().describe("GitLab project ID."),
+      project_id: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(envBackedDescription("GitLab project ID.", "WORKFLOW_ISSUE_PROJECT_ID")),
       issue_iid: z.number().int().positive().optional().describe("Issue IID (internal ID)."),
     },
   },
   withToolErrorHandling("gitlab_get_issue", async (args) => {
-    const projectId = requireNumberParam("gitlab_get_issue", "project_id", args.project_id, undefined);
+    const projectId = requireIssueProjectIdParam("gitlab_get_issue", "project_id", args.project_id);
     const issueIid = requireNumberParam("gitlab_get_issue", "issue_iid", args.issue_iid, undefined);
     enforceIssueProjectLock("gitlab_get_issue", projectId);
     return gitlab.getIssue(projectId, issueIid);
@@ -2625,7 +2626,7 @@ server.registerTool(
       "Upload binary file to project markdown uploads and return markdown/url metadata.",
     outputSchema: gitlabUploadProjectFileOutputSchema,
     inputSchema: {
-      project_id: z.number().int().positive().optional().describe("GitLab project ID."),
+      project_id: z.number().int().positive().optional().describe(anyProjectEnvBackedDescription("GitLab project ID.")),
       filename: z.string().optional().describe("Original file name."),
       content_base64: z.string().optional().describe("File content encoded in base64."),
       content_type: z
@@ -2635,12 +2636,7 @@ server.registerTool(
     },
   },
   withToolErrorHandling("gitlab_upload_project_file", async (args) => {
-    const projectId = requireNumberParam(
-      "gitlab_upload_project_file",
-      "project_id",
-      args.project_id,
-      undefined,
-    );
+    const projectId = requireAnyProjectIdParam("gitlab_upload_project_file", "project_id", args.project_id);
     const filename = requireStringParam("gitlab_upload_project_file", "filename", args.filename, undefined);
     const contentBase64 = requireStringParam(
       "gitlab_upload_project_file",
@@ -2665,7 +2661,12 @@ server.registerTool(
       "Extract image references from issue description/notes. When include_base64=true, download each image, return base64 metadata, and attach MCP image content blocks so the model can inspect the image itself.",
     outputSchema: gitlabGetIssueImagesOutputSchema,
     inputSchema: {
-      project_id: z.number().int().positive().optional().describe("GitLab project ID."),
+      project_id: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(envBackedDescription("GitLab project ID.", "WORKFLOW_ISSUE_PROJECT_ID")),
       issue_iid: z.number().int().positive().optional().describe("Issue IID."),
       include_notes: z
         .boolean()
@@ -2685,7 +2686,7 @@ server.registerTool(
   },
   async (args) => {
     try {
-      const projectId = requireNumberParam("gitlab_get_issue_images", "project_id", args.project_id, undefined);
+      const projectId = requireIssueProjectIdParam("gitlab_get_issue_images", "project_id", args.project_id);
       const issueIid = requireNumberParam("gitlab_get_issue_images", "issue_iid", args.issue_iid, undefined);
       const includeNotes = args.include_notes ?? true;
       const includeBase64 = args.include_base64 ?? false;
@@ -2792,7 +2793,12 @@ server.registerTool(
     description: "Get issue notes/comments by project_id + issue_iid.",
     outputSchema: gitlabGetIssueNotesOutputSchema,
     inputSchema: {
-      project_id: z.number().int().positive().optional().describe("GitLab project ID."),
+      project_id: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(envBackedDescription("GitLab project ID.", "WORKFLOW_ISSUE_PROJECT_ID")),
       issue_iid: z.number().int().positive().optional().describe("Issue IID (internal ID)."),
       sort: z.enum(["asc", "desc"]).optional().describe("Sort order."),
       order_by: z
@@ -2802,7 +2808,7 @@ server.registerTool(
     },
   },
   withToolErrorHandling("gitlab_get_issue_notes", async (args) => {
-    const projectId = requireNumberParam("gitlab_get_issue_notes", "project_id", args.project_id, undefined);
+    const projectId = requireIssueProjectIdParam("gitlab_get_issue_notes", "project_id", args.project_id);
     const issueIid = requireNumberParam("gitlab_get_issue_notes", "issue_iid", args.issue_iid, undefined);
     enforceIssueProjectLock("gitlab_get_issue_notes", projectId);
     return gitlab.getIssueNotes(projectId, issueIid, {
@@ -2819,7 +2825,12 @@ server.registerTool(
       "Create issue note/comment. Supports direct body or auto-generation from MR changed files (by MR IID or source branch).",
     outputSchema: gitlabAddIssueCommentOutputSchema,
     inputSchema: {
-      project_id: z.number().int().positive().optional().describe("GitLab project ID."),
+      project_id: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(envBackedDescription("GitLab project ID.", "WORKFLOW_ISSUE_PROJECT_ID")),
       issue_iid: z.number().int().positive().optional().describe("Issue IID."),
       body: z
         .string()
@@ -2834,7 +2845,12 @@ server.registerTool(
         .int()
         .positive()
         .optional()
-        .describe("Code project ID used for MR lookup/changes when auto_generate_from_mr_changes=true."),
+        .describe(
+          envBackedDescription(
+            "Code project ID used for MR lookup/changes when auto_generate_from_mr_changes=true.",
+            "WORKFLOW_CODE_PROJECT_ID",
+          ),
+        ),
       mr_iid: z
         .number()
         .int()
@@ -2872,7 +2888,7 @@ server.registerTool(
     },
   },
   withToolErrorHandling("gitlab_add_issue_comment", async (args) => {
-    const projectId = requireNumberParam("gitlab_add_issue_comment", "project_id", args.project_id, undefined);
+    const projectId = requireIssueProjectIdParam("gitlab_add_issue_comment", "project_id", args.project_id);
     const issueIid = requireNumberParam("gitlab_add_issue_comment", "issue_iid", args.issue_iid, undefined);
     enforceIssueProjectLock("gitlab_add_issue_comment", projectId);
 
@@ -3005,13 +3021,18 @@ server.registerTool(
     description: "Create repository branch by GitLab REST API.",
     outputSchema: gitlabCreateBranchOutputSchema,
     inputSchema: {
-      project_id: z.number().int().positive().optional().describe("GitLab project ID."),
+      project_id: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(envBackedDescription("GitLab project ID.", "WORKFLOW_CODE_PROJECT_ID")),
       branch: z.string().optional().describe("Branch name to create."),
       ref: z.string().optional().describe("Source ref (branch/tag/SHA)."),
     },
   },
   withToolErrorHandling("gitlab_create_branch", async (args) => {
-    const projectId = requireNumberParam("gitlab_create_branch", "project_id", args.project_id, undefined);
+    const projectId = requireCodeProjectIdParam("gitlab_create_branch", "project_id", args.project_id);
     const branch = requireStringParam("gitlab_create_branch", "branch", args.branch, undefined);
     const ref = requireStringParam("gitlab_create_branch", "ref", args.ref, undefined);
     enforceCodeProjectLock("gitlab_create_branch", projectId);
@@ -3025,7 +3046,12 @@ server.registerTool(
     description: "Get repository file by GitLab REST API /repository/files/:file_path.",
     outputSchema: gitlabGetFileOutputSchema,
     inputSchema: {
-      project_id: z.number().int().positive().optional().describe("GitLab project ID."),
+      project_id: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(envBackedDescription("GitLab project ID.", "WORKFLOW_CODE_PROJECT_ID")),
       file_path: z.string().optional().describe("Repository file path."),
       ref: z
         .string()
@@ -3034,7 +3060,7 @@ server.registerTool(
     },
   },
   withToolErrorHandling("gitlab_get_file", async (args) => {
-    const projectId = requireNumberParam("gitlab_get_file", "project_id", args.project_id, undefined);
+    const projectId = requireCodeProjectIdParam("gitlab_get_file", "project_id", args.project_id);
     const filePath = requireStringParam("gitlab_get_file", "file_path", args.file_path, undefined);
     enforceCodeProjectLock("gitlab_get_file", projectId);
     return gitlab.getFile(projectId, filePath, args.ref);
@@ -3047,7 +3073,12 @@ server.registerTool(
     description: "Create one commit with multiple file actions via GitLab commits API.",
     outputSchema: gitlabCommitFilesOutputSchema,
     inputSchema: {
-      project_id: z.number().int().positive().optional().describe("GitLab project ID."),
+      project_id: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(envBackedDescription("GitLab project ID.", "WORKFLOW_CODE_PROJECT_ID")),
       branch: z.string().optional().describe("Target branch."),
       commit_message: z.string().optional().describe("Commit message."),
       start_branch: z
@@ -3058,7 +3089,7 @@ server.registerTool(
     },
   },
   withToolErrorHandling("gitlab_commit_files", async (args) => {
-    const projectId = requireNumberParam("gitlab_commit_files", "project_id", args.project_id, undefined);
+    const projectId = requireCodeProjectIdParam("gitlab_commit_files", "project_id", args.project_id);
     const branch = requireStringParam("gitlab_commit_files", "branch", args.branch, undefined);
     const commitMessage = requireStringParam(
       "gitlab_commit_files",
@@ -3098,7 +3129,12 @@ server.registerTool(
     description: "Create merge request by GitLab REST API /projects/:id/merge_requests.",
     outputSchema: gitlabCreateMergeRequestOutputSchema,
     inputSchema: {
-      project_id: z.number().int().positive().optional().describe("GitLab project ID."),
+      project_id: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(envBackedDescription("GitLab project ID.", "WORKFLOW_CODE_PROJECT_ID")),
       source_branch: z.string().optional().describe("Source branch."),
       target_branch: z.string().optional().describe("Target branch."),
       title: z.string().optional().describe("Merge request title."),
@@ -3108,11 +3144,21 @@ server.registerTool(
         .int()
         .positive()
         .optional()
-        .describe("Optional issue project ID used to render related issue reference in MR description."),
+        .describe(
+          envBackedDescription(
+            "Optional issue project ID used to render related issue reference in MR description.",
+            "WORKFLOW_ISSUE_PROJECT_ID",
+          ),
+        ),
       issue_project_path: z
         .string()
         .optional()
-        .describe("Optional issue project path used to render related issue reference."),
+        .describe(
+          envBackedDescription(
+            "Optional issue project path used to render related issue reference.",
+            "WORKFLOW_ISSUE_PROJECT_PATH",
+          ),
+        ),
       issue_iid: z
         .number()
         .int()
@@ -3128,12 +3174,7 @@ server.registerTool(
     },
   },
   withToolErrorHandling("gitlab_create_merge_request", async (args) => {
-    const projectId = requireNumberParam(
-      "gitlab_create_merge_request",
-      "project_id",
-      args.project_id,
-      undefined,
-    );
+    const projectId = requireCodeProjectIdParam("gitlab_create_merge_request", "project_id", args.project_id);
     const sourceBranch = requireStringParam(
       "gitlab_create_merge_request",
       "source_branch",
@@ -3147,12 +3188,10 @@ server.registerTool(
       undefined,
     );
     const title = requireStringParam("gitlab_create_merge_request", "title", args.title, undefined);
-    const issueProjectId = ensurePositiveIntOptional(
-      "gitlab_create_merge_request",
-      "issue_project_id",
-      args.issue_project_id,
-    );
-    const issueProjectPath = args.issue_project_path?.trim() || undefined;
+    const issueProjectId =
+      ensurePositiveIntOptional("gitlab_create_merge_request", "issue_project_id", args.issue_project_id) ??
+      config.defaults.issueProjectId;
+    const issueProjectPath = optionalStringParam(args.issue_project_path, config.defaults.issueProjectPath);
     const issueIid = ensurePositiveIntOptional("gitlab_create_merge_request", "issue_iid", args.issue_iid);
 
     if ((issueProjectId !== undefined || issueProjectPath) && issueIid === undefined) {
@@ -3207,13 +3246,18 @@ server.registerTool(
     description: "Create merge-request note/comment.",
     outputSchema: gitlabCreateMrNoteOutputSchema,
     inputSchema: {
-      project_id: z.number().int().positive().optional().describe("GitLab project ID."),
+      project_id: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(envBackedDescription("GitLab project ID.", "WORKFLOW_CODE_PROJECT_ID")),
       mr_iid: z.number().int().positive().optional().describe("Merge request IID."),
       body: z.string().optional().describe("Comment markdown body."),
     },
   },
   withToolErrorHandling("gitlab_create_mr_note", async (args) => {
-    const projectId = requireNumberParam("gitlab_create_mr_note", "project_id", args.project_id, undefined);
+    const projectId = requireCodeProjectIdParam("gitlab_create_mr_note", "project_id", args.project_id);
     const mrIid = requireNumberParam("gitlab_create_mr_note", "mr_iid", args.mr_iid, undefined);
     const body = requireStringParam("gitlab_create_mr_note", "body", args.body, undefined);
     enforceCodeProjectLock("gitlab_create_mr_note", projectId);
@@ -3227,12 +3271,17 @@ server.registerTool(
     description: "Get merge request changes/diff metadata.",
     outputSchema: gitlabGetMrChangesOutputSchema,
     inputSchema: {
-      project_id: z.number().int().positive().optional().describe("GitLab project ID."),
+      project_id: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(envBackedDescription("GitLab project ID.", "WORKFLOW_CODE_PROJECT_ID")),
       mr_iid: z.number().int().positive().optional().describe("Merge request IID."),
     },
   },
   withToolErrorHandling("gitlab_get_mr_changes", async (args) => {
-    const projectId = requireNumberParam("gitlab_get_mr_changes", "project_id", args.project_id, undefined);
+    const projectId = requireCodeProjectIdParam("gitlab_get_mr_changes", "project_id", args.project_id);
     const mrIid = requireNumberParam("gitlab_get_mr_changes", "mr_iid", args.mr_iid, undefined);
     enforceCodeProjectLock("gitlab_get_mr_changes", projectId);
     return gitlab.getMergeRequestChanges(projectId, mrIid);
@@ -3245,7 +3294,12 @@ server.registerTool(
     description: "Approve merge request by GitLab approval API.",
     outputSchema: gitlabApproveMrOutputSchema,
     inputSchema: {
-      project_id: z.number().int().positive().optional().describe("GitLab project ID."),
+      project_id: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(envBackedDescription("GitLab project ID.", "WORKFLOW_CODE_PROJECT_ID")),
       mr_iid: z.number().int().positive().optional().describe("Merge request IID."),
       sha: z
         .string()
@@ -3254,7 +3308,7 @@ server.registerTool(
     },
   },
   withToolErrorHandling("gitlab_approve_mr", async (args) => {
-    const projectId = requireNumberParam("gitlab_approve_mr", "project_id", args.project_id, undefined);
+    const projectId = requireCodeProjectIdParam("gitlab_approve_mr", "project_id", args.project_id);
     const mrIid = requireNumberParam("gitlab_approve_mr", "mr_iid", args.mr_iid, undefined);
     enforceCodeProjectLock("gitlab_approve_mr", projectId);
     return gitlab.approveMergeRequest(projectId, mrIid, args.sha?.trim());
@@ -3267,12 +3321,17 @@ server.registerTool(
     description: "Remove approval from merge request.",
     outputSchema: gitlabUnapproveMrOutputSchema,
     inputSchema: {
-      project_id: z.number().int().positive().optional().describe("GitLab project ID."),
+      project_id: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(envBackedDescription("GitLab project ID.", "WORKFLOW_CODE_PROJECT_ID")),
       mr_iid: z.number().int().positive().optional().describe("Merge request IID."),
     },
   },
   withToolErrorHandling("gitlab_unapprove_mr", async (args) => {
-    const projectId = requireNumberParam("gitlab_unapprove_mr", "project_id", args.project_id, undefined);
+    const projectId = requireCodeProjectIdParam("gitlab_unapprove_mr", "project_id", args.project_id);
     const mrIid = requireNumberParam("gitlab_unapprove_mr", "mr_iid", args.mr_iid, undefined);
     enforceCodeProjectLock("gitlab_unapprove_mr", projectId);
     return gitlab.unapproveMergeRequest(projectId, mrIid);
