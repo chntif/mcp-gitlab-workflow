@@ -7,13 +7,11 @@ export interface BranchNameInput {
 }
 
 export interface DefaultIssueTemplateInput {
+  summary: string;
+  requirementText: string;
   sourceText: string;
-  expectedBehavior: string;
-  currentBehavior?: string;
-  given: string;
-  when: string;
-  then: string;
   repoPath?: string;
+  branchName: string;
 }
 
 export interface IssueLogEntryInput {
@@ -110,24 +108,24 @@ export function buildIssueTitle(summary: string, label?: string): string {
 }
 
 export function buildDefaultIssueDescription(input: DefaultIssueTemplateInput): string {
-  const currentBehaviorLine = input.currentBehavior
-    ? `* **Current behavior**: ${input.currentBehavior}\n`
-    : "";
   const repoLine = input.repoPath ? input.repoPath : "N/A";
+  const normalizedSource = input.sourceText.trim();
+  const normalizedRequirement = input.requirementText.trim();
+  const backgroundSection =
+    normalizedSource && normalizedSource !== normalizedRequirement
+      ? `\n### Background\n${normalizedSource}\n`
+      : "";
 
-  return `### 1. Background and Goal (Why?)
-* **Source**: ${input.sourceText}
+  return `### Summary
+${input.summary}
 
-### 2. What should change (What?)
-${currentBehaviorLine}* **Expected behavior**: ${input.expectedBehavior}
+${backgroundSection}
+### Expected Change
+${normalizedRequirement}
 
-### 3. Acceptance Criteria
-- GIVEN ${input.given}
-- WHEN ${input.when}
-- THEN ${input.then}
-
-### 4. Scope
-* **Repository**: ${repoLine}`;
+### Scope
+- Repository: ${repoLine}
+- Suggested branch: \`${input.branchName}\``;
 }
 
 export function renderTemplate(template: string, variables: Record<string, string>): string {

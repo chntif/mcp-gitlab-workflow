@@ -169,11 +169,6 @@ function buildIssueDescriptionFromInput(params: {
   requirementText: string;
   summary: string;
   sourceText?: string;
-  expectedBehavior?: string;
-  currentBehavior?: string;
-  given?: string;
-  when?: string;
-  then?: string;
   issueProjectId: number;
   issueProjectPath?: string;
   codeProjectId?: number;
@@ -187,11 +182,7 @@ function buildIssueDescriptionFromInput(params: {
       requirement_text: params.requirementText,
       summary: params.summary,
       source_text: params.sourceText ?? params.requirementText,
-      expected_behavior: params.expectedBehavior ?? "",
-      current_behavior: params.currentBehavior ?? "",
-      given: params.given ?? "",
-      when: params.when ?? "",
-      then: params.then ?? "",
+      expected_change: params.requirementText,
       issue_project_id: String(params.issueProjectId),
       code_project_id: String(params.codeProjectId ?? ""),
       issue_project_path: params.issueProjectPath ?? "",
@@ -206,27 +197,12 @@ function buildIssueDescriptionFromInput(params: {
     });
   }
 
-  if (!params.expectedBehavior) {
-    missingParam(params.toolName, "expected_behavior");
-  }
-  if (!params.given) {
-    missingParam(params.toolName, "given");
-  }
-  if (!params.when) {
-    missingParam(params.toolName, "when");
-  }
-  if (!params.then) {
-    missingParam(params.toolName, "then");
-  }
-
   return buildDefaultIssueDescription({
+    summary: params.summary,
+    requirementText: params.requirementText,
     sourceText: params.sourceText ?? params.requirementText,
-    expectedBehavior: params.expectedBehavior,
-    currentBehavior: params.currentBehavior,
-    given: params.given,
-    when: params.when,
-    then: params.then,
     repoPath: params.codeProjectPath,
+    branchName: params.branchName,
   });
 }
 
@@ -1170,11 +1146,6 @@ async function executeAnalyzeAndCreateIssueWorkflow(params: {
   toolName: string;
   requirementText: string;
   sourceText?: string;
-  expectedBehavior?: string;
-  currentBehavior?: string;
-  given?: string;
-  when?: string;
-  then?: string;
   issueTemplate?: string;
   templateVariables?: Record<string, string>;
   englishSlug?: string;
@@ -1226,11 +1197,6 @@ async function executeAnalyzeAndCreateIssueWorkflow(params: {
     requirementText: params.requirementText,
     summary: parsed.summary,
     sourceText: params.sourceText,
-    expectedBehavior: params.expectedBehavior,
-    currentBehavior: params.currentBehavior,
-    given: params.given,
-    when: params.when,
-    then: params.then,
     issueProjectId: params.issueProjectId,
     issueProjectPath: params.issueProjectPath,
     codeProjectId: params.codeProjectId,
@@ -1505,16 +1471,16 @@ server.registerTool(
     outputSchema: workflowAnalyzeAndCreateIssueOutputSchema,
     inputSchema: {
       requirement_text: z.string().min(1).describe("Raw user requirement text."),
-      source_text: z.string().optional().describe("Background/source text for issue template."),
-      expected_behavior: z.string().optional().describe("Expected behavior (used by default template)."),
-      current_behavior: z.string().optional().describe("Current behavior (optional)."),
-      given: z.string().optional().describe("GIVEN clause for acceptance criteria."),
-      when: z.string().optional().describe("WHEN clause for acceptance criteria."),
-      then: z.string().optional().describe("THEN clause for acceptance criteria."),
+      source_text: z
+        .string()
+        .optional()
+        .describe("Optional extra background text for the default issue template."),
       issue_template: z
         .string()
         .optional()
-        .describe("Optional issue markdown template. Supports variables like {{summary}}."),
+        .describe(
+          "Optional full issue markdown template. Supported built-in variables include {{summary}}, {{requirement_text}}, {{source_text}}, {{expected_change}}, {{issue_project_id}}, {{code_project_id}}, {{issue_project_path}}, {{code_project_path}}, {{branch_name}}, {{work_type}}, {{label}}.",
+        ),
       template_variables: z
         .record(z.string())
         .optional()
@@ -1588,11 +1554,6 @@ server.registerTool(
       toolName: "workflow_requirement_to_issue",
       requirementText: args.requirement_text,
       sourceText: args.source_text,
-      expectedBehavior: args.expected_behavior,
-      currentBehavior: args.current_behavior,
-      given: args.given,
-      when: args.when,
-      then: args.then,
       issueTemplate: args.issue_template,
       templateVariables: args.template_variables,
       englishSlug: args.english_slug,
@@ -2124,16 +2085,16 @@ server.registerTool(
     outputSchema: workflowRequirementToDeliveryFullOutputSchema,
     inputSchema: {
       requirement_text: z.string().min(1).describe("Raw user requirement text."),
-      source_text: z.string().optional().describe("Background/source text for issue template."),
-      expected_behavior: z.string().optional().describe("Expected behavior (used by default template)."),
-      current_behavior: z.string().optional().describe("Current behavior (optional)."),
-      given: z.string().optional().describe("GIVEN clause for acceptance criteria."),
-      when: z.string().optional().describe("WHEN clause for acceptance criteria."),
-      then: z.string().optional().describe("THEN clause for acceptance criteria."),
+      source_text: z
+        .string()
+        .optional()
+        .describe("Optional extra background text for the default issue template."),
       issue_template: z
         .string()
         .optional()
-        .describe("Optional issue markdown template. Supports variables like {{summary}}."),
+        .describe(
+          "Optional full issue markdown template. Supported built-in variables include {{summary}}, {{requirement_text}}, {{source_text}}, {{expected_change}}, {{issue_project_id}}, {{code_project_id}}, {{issue_project_path}}, {{code_project_path}}, {{branch_name}}, {{work_type}}, {{label}}.",
+        ),
       template_variables: z
         .record(z.string())
         .optional()
@@ -2258,11 +2219,6 @@ server.registerTool(
       toolName: "workflow_requirement_to_delivery",
       requirementText: args.requirement_text,
       sourceText: args.source_text,
-      expectedBehavior: args.expected_behavior,
-      currentBehavior: args.current_behavior,
-      given: args.given,
-      when: args.when,
-      then: args.then,
       issueTemplate: args.issue_template,
       templateVariables: args.template_variables,
       englishSlug: args.english_slug,
