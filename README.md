@@ -43,23 +43,23 @@ The workflow can automatically complete the flow below:
 
 `requirement analysis -> issue creation -> branch -> code change -> MR -> issue update`
 
-![image-1](assets/image-1.png)
+![image-1](https://raw.githubusercontent.com/chntif/mcp-gitlab-workflow/main/assets/image-1.png)
 
 #### (1) Issue creation
 
-![Issue creation](assets/image-2.png)
+![Issue creation](https://raw.githubusercontent.com/chntif/mcp-gitlab-workflow/main/assets/image-2.png)
 
 #### (2) Code changes and MR submission based on the issue
 
-![MR](assets/image-3.png)
+![MR](https://raw.githubusercontent.com/chntif/mcp-gitlab-workflow/main/assets/image-3.png)
 
 #### (3) Issue comment
 
-![Issue comment](assets/image-4.png)
+![Issue comment](https://raw.githubusercontent.com/chntif/mcp-gitlab-workflow/main/assets/image-4.png)
 
 #### (4) Local `issue-log.md`
 
-![issue-log.md](assets/image-5.png)
+![issue-log.md](https://raw.githubusercontent.com/chntif/mcp-gitlab-workflow/main/assets/image-5.png)
 
 With this workflow, a developer can hand a requirement or an assigned issue directly to an agent and let it complete the full development flow in an issue-driven way.
 

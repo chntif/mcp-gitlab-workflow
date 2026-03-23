@@ -1,6 +1,6 @@
 {
   "name": "@chntif/mcp-gitlab-workflow",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": false,
   "type": "module",
   "description": "GitLab MCP: supports creating issues from requirements or modifying code and submitting merge requests from existing issues, while also providing a set of atomic GitLab API tools for issue-driven development.",
@@ -13,6 +13,7 @@
   "files": [
     "dist",
     "README.md",
+    "README.zh-CN.md",
     "LICENSE"
   ],
   "publishConfig": {

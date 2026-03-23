@@ -43,23 +43,23 @@ Issue 类工具默认回落到 `WORKFLOW_ISSUE_PROJECT_ID`，代码和 MR 类工
 
 `需求解析 -> 创建 Issue -> 拉取分支 -> 修改代码 -> MR -> 回填 Issue`
 
-![image-1](assets/image-1.png)
+![image-1](https://raw.githubusercontent.com/chntif/mcp-gitlab-workflow/main/assets/image-1.png)
 
 #### (1) Issue 创建
 
-![Issue创建](assets/image-2.png)
+![Issue创建](https://raw.githubusercontent.com/chntif/mcp-gitlab-workflow/main/assets/image-2.png)
 
 #### (2) 基于 issue 修改代码并提交 MR
 
-![MR](assets/image-3.png)
+![MR](https://raw.githubusercontent.com/chntif/mcp-gitlab-workflow/main/assets/image-3.png)
 
 #### (3) Issue 评论
 
-![issue评论](assets/image-4.png)
+![issue评论](https://raw.githubusercontent.com/chntif/mcp-gitlab-workflow/main/assets/image-4.png)
 
 #### (4) 本地 `issue-log.md`
 
-![issue-log.md](assets/image-5.png)
+![issue-log.md](https://raw.githubusercontent.com/chntif/mcp-gitlab-workflow/main/assets/image-5.png)
 
 通过这条流程，开发者可以将一个需求或分配给自己的 Issue 直接交给 agent，自动完成面向 Issue 的开发交付。
 
