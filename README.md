@@ -83,7 +83,7 @@
 - `GITLAB_API_BASE_URL=https://gitlab.com/api/v4`
 - `WORKFLOW_BASE_BRANCH=develop`
 - `WORKFLOW_TARGET_BRANCH=develop`
-- `WORKFLOW_ISSUE_LOG_PATH=issue-log.md`
+- `WORKFLOW_ISSUE_LOG_PATH=issue-log.md`（相对路径时按显式 `repo_path` / delivery 的项目根目录解析）
 - `WORKFLOW_LOCAL_REMOTE_NAME=origin`
 
 默认未配置、需要用户显式传参或设置 env 的配置项：
@@ -92,8 +92,6 @@
 - `WORKFLOW_ISSUE_PROJECT_PATH`
 - `WORKFLOW_CODE_PROJECT_ID`
 - `WORKFLOW_CODE_PROJECT_PATH`
-- `WORKFLOW_LOCAL_REPO_PATH`
-
 其余配置项可以通过 env 覆盖内置默认值：
 
 - `WORKFLOW_BASE_BRANCH`

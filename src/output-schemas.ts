@@ -19,8 +19,8 @@ function createToolOutputSchema(dataSchema: z.ZodTypeAny, dataDescription: strin
 }
 
 const workflowParseRequirementDataSchema = z.object({
-  work_type: z.enum(["feat", "fix", "chore"]).describe("Detected work type."),
-  commit_type: z.enum(["feat", "fix", "chore"]).describe("Suggested conventional commit type."),
+  work_type: z.string().describe("Detected work type / branch prefix."),
+  commit_type: z.string().describe("Suggested commit type / branch prefix."),
   summary: z.string().describe("Short requirement summary."),
   issue_title: z.string().describe("Generated issue title."),
   branch_name: z.string().describe("Suggested git branch name."),
@@ -102,6 +102,18 @@ const workflowLocalSyncCheckoutBranchDataSchema = z.object({
   commands: z.array(z.string()).describe("Executed git commands."),
   current_branch: z.string().describe("Current local branch after execution."),
   head_sha: z.string().describe("HEAD commit SHA after checkout."),
+});
+
+const workflowPrepareDeliveryWorkspaceDataSchema = z.object({
+  repo_path: z.string().describe("Absolute local repository path."),
+  remote_name: z.string().describe("Git remote name used for synchronization."),
+  base_branch: z.string().describe("Base branch refreshed before code generation."),
+  current_branch: z.string().describe("Current local branch after preparation."),
+  base_head_sha: z.string().describe("Prepared local/remote HEAD SHA for the base branch."),
+  commands: z.array(z.string()).describe("Executed git commands."),
+  preparation_key: z.string().describe("Server-issued key required by delivery workflows."),
+  prepared_at: z.string().describe("Preparation timestamp in ISO-8601 format."),
+  expires_at: z.string().describe("Preparation expiry timestamp in ISO-8601 format."),
 });
 
 const workflowIssueToMrFullDataSchema = z.object({
@@ -330,6 +342,10 @@ export const workflowReviewMrAndCommentOutputSchema = createToolOutputSchema(
 export const workflowLocalSyncCheckoutBranchOutputSchema = createToolOutputSchema(
   workflowLocalSyncCheckoutBranchDataSchema,
   "Local repository sync and branch checkout result.",
+);
+export const workflowPrepareDeliveryWorkspaceOutputSchema = createToolOutputSchema(
+  workflowPrepareDeliveryWorkspaceDataSchema,
+  "Prepared local workspace state used to generate delivery commit_actions.",
 );
 export const workflowIssueToMrFullOutputSchema = createToolOutputSchema(
   workflowIssueToMrFullDataSchema,

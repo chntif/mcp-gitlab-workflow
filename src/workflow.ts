@@ -1,4 +1,4 @@
-export type WorkType = "feat" | "fix" | "chore";
+export type WorkType = string;
 
 export interface BranchNameInput {
   workType: WorkType;
@@ -46,6 +46,22 @@ const CHORE_KEYWORDS = [
   "\u91cd\u6784",
 ];
 
+const WORK_TYPE_PATTERN = /^[a-z][a-z0-9._-]*$/;
+
+export function normalizeWorkType(value: string): WorkType {
+  const normalized = value.trim().toLowerCase();
+  if (!WORK_TYPE_PATTERN.test(normalized)) {
+    throw new Error(
+      "Invalid work type. Use a lowercase git/conventional prefix like feat, fix, docs, refactor, hotfix, feature.",
+    );
+  }
+  return normalized;
+}
+
+export function isValidWorkType(value: string): boolean {
+  return WORK_TYPE_PATTERN.test(value.trim().toLowerCase());
+}
+
 export function detectWorkType(requirementText: string): WorkType {
   const normalized = requirementText.toLowerCase();
   if (FIX_KEYWORDS.some((keyword) => normalized.includes(keyword))) {
@@ -89,7 +105,7 @@ export function buildBranchName(input: BranchNameInput): string {
   const fromInput = input.englishSlug ? normalizeSlug(input.englishSlug) : "";
   const fromRequirement = normalizeSlug(extractAsciiSlug(input.requirementText));
   const slug = fromInput || fromRequirement || fallbackSlug();
-  return `${input.workType}/${slug}`;
+  return `${normalizeWorkType(input.workType)}/${slug}`;
 }
 
 export function summarizeRequirement(requirementText: string, maxLength = 30): string {

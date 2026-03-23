@@ -8,7 +8,6 @@ export interface WorkflowEnvDefaults {
   label?: string;
   assigneeUsername?: string;
   issueLogPath?: string;
-  localRepoPath?: string;
   localGitRemoteName?: string;
   checkoutLocalBranch?: boolean;
   updateIssueLog?: boolean;
@@ -39,7 +38,6 @@ export const DEFAULT_RUNTIME_CONFIG: RuntimeConfig = {
     label: undefined,
     assigneeUsername: undefined,
     issueLogPath: "issue-log.md",
-    localRepoPath: process.cwd(),
     localGitRemoteName: "origin",
     checkoutLocalBranch: false,
     updateIssueLog: true,
@@ -89,7 +87,6 @@ export function getRuntimeConfig(): RuntimeConfig {
         DEFAULT_RUNTIME_CONFIG.defaults.assigneeUsername,
       ),
       issueLogPath: stringEnv("WORKFLOW_ISSUE_LOG_PATH", DEFAULT_RUNTIME_CONFIG.defaults.issueLogPath),
-      localRepoPath: stringEnv("WORKFLOW_LOCAL_REPO_PATH", DEFAULT_RUNTIME_CONFIG.defaults.localRepoPath),
       localGitRemoteName: stringEnv(
         "WORKFLOW_LOCAL_REMOTE_NAME",
         DEFAULT_RUNTIME_CONFIG.defaults.localGitRemoteName,
