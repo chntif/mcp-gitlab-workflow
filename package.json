@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": false,
   "type": "module",
-  "description": "MCP server for automating GitLab development workflows, turning requirements or assigned issues into merge requests through requirement analysis, issue creation, branching, coding, MR creation, and issue updates. Built for issue-driven development",
+  "description": "GitLab MCP: supports creating issues from requirements or modifying code and submitting merge requests from existing issues, while also providing a set of atomic GitLab API tools for issue-driven development.",
   "main": "dist/src/server.js",
   "bin": {
     "mcp-gitlab-workflow": "dist/src/server.js"
@@ -31,8 +31,9 @@
     "mcp",
     "model-context-protocol",
     "gitlab",
-    "workflow",
-    "automation"
+    "automation",
+    "issue-driven-development",
+    "developer-tools"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
