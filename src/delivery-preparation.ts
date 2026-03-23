@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { DeliveryMethod } from "./delivery-mode.js";
 
 export const DELIVERY_PREPARATION_TTL_MS = 30 * 60 * 1000;
 const DELIVERY_PREPARATION_STATE_DIR = ".mcp-state";
@@ -13,6 +14,8 @@ export type DeliveryPreparationRecord = {
   remoteName: string;
   baseBranch: string;
   baseHeadSha: string;
+  deliveryMethod: DeliveryMethod;
+  workingBranch?: string;
   preparedAt: string;
   expiresAt: string;
 };
@@ -46,6 +49,9 @@ function isValidRecord(value: unknown): value is DeliveryPreparationRecord {
     candidate.baseBranch.trim().length > 0 &&
     typeof candidate.baseHeadSha === "string" &&
     candidate.baseHeadSha.trim().length > 0 &&
+    (candidate.deliveryMethod === "local_git" || candidate.deliveryMethod === "remote_api") &&
+    (candidate.workingBranch === undefined ||
+      (typeof candidate.workingBranch === "string" && candidate.workingBranch.trim().length > 0)) &&
     typeof candidate.preparedAt === "string" &&
     !Number.isNaN(Date.parse(candidate.preparedAt)) &&
     typeof candidate.expiresAt === "string" &&
@@ -105,6 +111,8 @@ export async function saveDeliveryPreparationRecord(
     remoteName: string;
     baseBranch: string;
     baseHeadSha: string;
+    deliveryMethod: DeliveryMethod;
+    workingBranch?: string;
     nowMs?: number;
   },
 ): Promise<DeliveryPreparationRecord> {
@@ -116,6 +124,8 @@ export async function saveDeliveryPreparationRecord(
     remoteName: params.remoteName,
     baseBranch: params.baseBranch,
     baseHeadSha: params.baseHeadSha,
+    deliveryMethod: params.deliveryMethod,
+    workingBranch: params.workingBranch,
     preparedAt: new Date(nowMs).toISOString(),
     expiresAt: new Date(nowMs + DELIVERY_PREPARATION_TTL_MS).toISOString(),
   };

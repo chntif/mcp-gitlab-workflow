@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, resolve } from "node:path";
-import { spawn } from "node:child_process";
+import { dirname } from "node:path";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 import { getRuntimeConfig } from "./config.js";
+import { DELIVERY_METHOD_VALUES, normalizeDeliveryMethod, type DeliveryMethod } from "./delivery-mode.js";
 import {
   deleteDeliveryPreparationRecord,
   getDeliveryPreparationRecord,
@@ -16,6 +16,16 @@ import {
   type DeliveryPreparationRecord,
 } from "./delivery-preparation.js";
 import { CommitActionInput, GitLabClient } from "./gitlab.js";
+import { appendIssueLogMarkdown, resolveRepoScopedPath } from "./issue-log.js";
+import {
+  LocalGitError,
+  commitAndPushLocalBranch,
+  ensureCleanWorktree,
+  getCurrentBranchName,
+  getHeadSha,
+  prepareLocalWorkingBranch,
+  runGitInRepo,
+} from "./local-delivery.js";
 import {
   WorkType,
   buildBranchName,
@@ -140,6 +150,10 @@ const workTypeSchema = z
     "Use a lowercase git/conventional prefix like feat, fix, docs, refactor, hotfix, feature.",
   );
 
+const deliveryMethodSchema = z
+  .enum(DELIVERY_METHOD_VALUES)
+  .describe("Delivery implementation mode. Use 'local_git' or 'remote_api'.");
+
 
 function getTodayDateString(): string {
   return new Date().toISOString().slice(0, 10);
@@ -180,6 +194,38 @@ function parseRequirementMetadata(params: {
     issueTitle,
     branchName,
   };
+}
+
+function resolvePrepareWorkingBranch(params: {
+  toolName: string;
+  deliveryMethod: DeliveryMethod;
+  branchName?: string;
+  englishSlug?: string;
+  workType?: WorkType;
+  summary?: string;
+  requirementText?: string;
+}): string | undefined {
+  if (params.deliveryMethod !== "local_git") {
+    return undefined;
+  }
+
+  const explicitBranchName = params.branchName?.trim();
+  if (explicitBranchName) {
+    return explicitBranchName;
+  }
+
+  const requirementSeed = params.requirementText?.trim() || params.summary?.trim();
+  if (!requirementSeed) {
+    missingParam(params.toolName, "branch_name");
+  }
+
+  return buildBranchName({
+    workType: params.workType
+      ? normalizeWorkType(params.workType)
+      : detectWorkType(requirementSeed),
+    englishSlug: params.englishSlug,
+    requirementText: requirementSeed,
+  });
 }
 
 function buildIssueDescriptionFromInput(params: {
@@ -420,7 +466,7 @@ function enforceAnyLockedProject(toolName: string, projectId: number) {
 }
 
 function toErrorPayload(toolName: string, error: unknown) {
-  if (error instanceof ToolInputError) {
+  if (error instanceof ToolInputError || error instanceof LocalGitError) {
     return {
       ok: false,
       tool: toolName,
@@ -456,26 +502,6 @@ function withToolErrorHandling<TArgs>(
       return textResult(toErrorPayload(toolName, error));
     }
   };
-}
-
-function resolveRepoScopedPath(repoPath: string, targetPath: string): string {
-  return isAbsolute(targetPath) ? targetPath : resolve(repoPath, targetPath);
-}
-
-async function appendMarkdown(repoPath: string, logPath: string, markdown: string): Promise<string> {
-  const absolutePath = resolveRepoScopedPath(repoPath, logPath);
-  await mkdir(dirname(absolutePath), { recursive: true });
-
-  let content = "";
-  try {
-    content = await readFile(absolutePath, "utf8");
-  } catch {
-    content = "";
-  }
-
-  const spacer = content.endsWith("\n\n") || content.length === 0 ? "" : "\n";
-  await writeFile(absolutePath, `${content}${spacer}${markdown}`, "utf8");
-  return absolutePath;
 }
 
 async function updateIssueLogWithMr(params: {
@@ -807,72 +833,19 @@ async function ensureLabelsExist(
   return normalized;
 }
 
-async function runGitInRepo(toolName: string, repoPath: string, gitArgs: string[]): Promise<string> {
-  return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn("git", ["-C", repoPath, ...gitArgs], {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    let stdout = "";
-    let stderr = "";
-
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-
-    child.on("error", (error) => {
-      rejectPromise(
-        new ToolInputError(
-          `[${toolName}] Failed to execute git command: git -C ${repoPath} ${gitArgs.join(" ")} (${error.message})`,
-        ),
-      );
-    });
-
-    child.on("close", (code) => {
-      if (code !== 0) {
-        rejectPromise(
-          new ToolInputError(
-            `[${toolName}] Git command failed (exit=${code}): git -C ${repoPath} ${gitArgs.join(
-              " ",
-            )}\n${stderr || stdout}`,
-          ),
-        );
-        return;
-      }
-      resolvePromise(stdout.trim());
-    });
-  });
-}
-
-async function ensureCleanWorktree(toolName: string, repoPath: string): Promise<void> {
-  const status = await runGitInRepo(toolName, repoPath, ["status", "--porcelain"]);
-  if (status.trim()) {
-    throw new ToolInputError(
-      `[${toolName}] Local repository '${repoPath}' has uncommitted changes. Clean the worktree before running this workflow.`,
-    );
-  }
-}
-
-async function getCurrentBranchName(toolName: string, repoPath: string): Promise<string> {
-  return runGitInRepo(toolName, repoPath, ["rev-parse", "--abbrev-ref", "HEAD"]);
-}
-
-async function getHeadSha(toolName: string, repoPath: string, rev = "HEAD"): Promise<string> {
-  return runGitInRepo(toolName, repoPath, ["rev-parse", rev]);
-}
-
 async function prepareDeliveryWorkspace(params: {
   toolName: string;
   repoPath: string;
   remoteName: string;
   baseBranch: string;
+  deliveryMethod: DeliveryMethod;
+  workingBranch?: string;
 }): Promise<{
   repo_path: string;
   remote_name: string;
+  delivery_method: DeliveryMethod;
   base_branch: string;
+  working_branch?: string;
   current_branch: string;
   base_head_sha: string;
   commands: string[];
@@ -880,50 +853,82 @@ async function prepareDeliveryWorkspace(params: {
   prepared_at: string;
   expires_at: string;
 }> {
-  await ensureCleanWorktree(params.toolName, params.repoPath);
-
-  const commands: string[] = [];
-  const pushCommand = (args: string[]) => {
-    commands.push(`git -C ${params.repoPath} ${args.join(" ")}`);
+  let prepared: {
+    repo_path: string;
+    remote_name: string;
+    base_branch: string;
+    current_branch: string;
+    base_head_sha: string;
+    commands: string[];
+    working_branch?: string;
   };
 
-  const fetchArgs = ["fetch", params.remoteName, params.baseBranch];
-  pushCommand(fetchArgs);
-  await runGitInRepo(params.toolName, params.repoPath, fetchArgs);
+  if (params.deliveryMethod === "local_git") {
+    const workingBranch = params.workingBranch?.trim();
+    if (!workingBranch) {
+      missingParam(params.toolName, "branch_name");
+    }
+    prepared = await prepareLocalWorkingBranch({
+      toolName: params.toolName,
+      repoPath: params.repoPath,
+      remoteName: params.remoteName,
+      baseBranch: params.baseBranch,
+      workingBranch,
+    });
+  } else {
+    await ensureCleanWorktree(params.toolName, params.repoPath);
 
-  const checkoutArgs = ["checkout", params.baseBranch];
-  pushCommand(checkoutArgs);
-  await runGitInRepo(params.toolName, params.repoPath, checkoutArgs);
+    const commands: string[] = [];
+    const pushCommand = (args: string[]) => {
+      commands.push(`git -C ${params.repoPath} ${args.join(" ")}`);
+    };
 
-  const pullArgs = ["pull", params.remoteName, params.baseBranch];
-  pushCommand(pullArgs);
-  await runGitInRepo(params.toolName, params.repoPath, pullArgs);
+    const fetchArgs = ["fetch", params.remoteName, params.baseBranch];
+    pushCommand(fetchArgs);
+    await runGitInRepo(params.toolName, params.repoPath, fetchArgs);
 
-  await ensureCleanWorktree(params.toolName, params.repoPath);
+    const checkoutArgs = ["checkout", params.baseBranch];
+    pushCommand(checkoutArgs);
+    await runGitInRepo(params.toolName, params.repoPath, checkoutArgs);
 
-  const currentBranch = await getCurrentBranchName(params.toolName, params.repoPath);
-  if (currentBranch.trim() !== params.baseBranch) {
-    throw new ToolInputError(
-      `[${params.toolName}] Expected current branch '${params.baseBranch}' after preparation, got '${currentBranch.trim()}'.`,
-    );
+    const pullArgs = ["pull", params.remoteName, params.baseBranch];
+    pushCommand(pullArgs);
+    await runGitInRepo(params.toolName, params.repoPath, pullArgs);
+
+    await ensureCleanWorktree(params.toolName, params.repoPath);
+
+    const currentBranch = await getCurrentBranchName(params.toolName, params.repoPath);
+    if (currentBranch.trim() !== params.baseBranch) {
+      throw new ToolInputError(
+        `[${params.toolName}] Expected current branch '${params.baseBranch}' after preparation, got '${currentBranch.trim()}'.`,
+      );
+    }
+
+    const baseHeadSha = await getHeadSha(params.toolName, params.repoPath);
+    prepared = {
+      repo_path: params.repoPath,
+      remote_name: params.remoteName,
+      base_branch: params.baseBranch,
+      current_branch: currentBranch,
+      base_head_sha: baseHeadSha,
+      commands,
+    };
   }
 
-  const baseHeadSha = await getHeadSha(params.toolName, params.repoPath);
   const statePath = getDeliveryPreparationStatePath();
   const record = await saveDeliveryPreparationRecord(statePath, {
     repoPath: params.repoPath,
     remoteName: params.remoteName,
     baseBranch: params.baseBranch,
-    baseHeadSha,
+    baseHeadSha: prepared.base_head_sha,
+    deliveryMethod: params.deliveryMethod,
+    workingBranch: prepared.working_branch,
   });
 
   return {
-    repo_path: params.repoPath,
-    remote_name: params.remoteName,
-    base_branch: params.baseBranch,
-    current_branch: currentBranch,
-    base_head_sha: baseHeadSha,
-    commands,
+    ...prepared,
+    delivery_method: params.deliveryMethod,
+    working_branch: prepared.working_branch,
     preparation_key: record.preparationKey,
     prepared_at: record.preparedAt,
     expires_at: record.expiresAt,
@@ -944,20 +949,32 @@ async function requireDeliveryPreparation(params: {
     );
   }
 
-  await ensureCleanWorktree(params.toolName, record.repoPath);
-
   const currentBranch = await getCurrentBranchName(params.toolName, record.repoPath);
-  if (currentBranch.trim() !== record.baseBranch) {
-    throw new ToolInputError(
-      `[${params.toolName}] preparation_key is no longer valid because local branch is '${currentBranch.trim()}', expected '${record.baseBranch}'. Re-run workflow_prepare_delivery_workspace.`,
-    );
-  }
+  if (record.deliveryMethod === "local_git") {
+    if (!record.workingBranch) {
+      throw new ToolInputError(
+        `[${params.toolName}] preparation_key is missing working_branch for delivery_method=local_git. Re-run workflow_prepare_delivery_workspace.`,
+      );
+    }
+    if (currentBranch.trim() !== record.workingBranch) {
+      throw new ToolInputError(
+        `[${params.toolName}] preparation_key is no longer valid because local branch is '${currentBranch.trim()}', expected '${record.workingBranch}'. Re-run workflow_prepare_delivery_workspace.`,
+      );
+    }
+  } else {
+    await ensureCleanWorktree(params.toolName, record.repoPath);
+    if (currentBranch.trim() !== record.baseBranch) {
+      throw new ToolInputError(
+        `[${params.toolName}] preparation_key is no longer valid because local branch is '${currentBranch.trim()}', expected '${record.baseBranch}'. Re-run workflow_prepare_delivery_workspace.`,
+      );
+    }
 
-  const localHeadSha = await getHeadSha(params.toolName, record.repoPath);
-  if (localHeadSha.trim() !== record.baseHeadSha) {
-    throw new ToolInputError(
-      `[${params.toolName}] preparation_key is no longer valid because local HEAD changed from '${record.baseHeadSha}' to '${localHeadSha.trim()}'. Re-run workflow_prepare_delivery_workspace.`,
-    );
+    const localHeadSha = await getHeadSha(params.toolName, record.repoPath);
+    if (localHeadSha.trim() !== record.baseHeadSha) {
+      throw new ToolInputError(
+        `[${params.toolName}] preparation_key is no longer valid because local HEAD changed from '${record.baseHeadSha}' to '${localHeadSha.trim()}'. Re-run workflow_prepare_delivery_workspace.`,
+      );
+    }
   }
 
   await runGitInRepo(params.toolName, record.repoPath, ["fetch", record.remoteName, record.baseBranch]);
@@ -1382,6 +1399,7 @@ async function executeAnalyzeAndCreateIssueWorkflow(params: {
 async function executeIssueToMrFullWorkflow(params: {
   toolName: string;
   preparation: DeliveryPreparationRecord;
+  deliveryMethod: DeliveryMethod;
   issueProjectId: number;
   issueProjectPath?: string;
   issueIid: number;
@@ -1393,7 +1411,7 @@ async function executeIssueToMrFullWorkflow(params: {
   workType?: WorkType;
   summary?: string;
   commitMessage?: string;
-  commitActions: CommitActionInput[];
+  commitActions?: CommitActionInput[];
   changeSummary: string;
   testPlan: string;
   label?: string;
@@ -1418,30 +1436,92 @@ async function executeIssueToMrFullWorkflow(params: {
     : detectWorkType(requirementText || issueTitle);
   const summaryCandidate = params.summary?.trim() || getLabelStrippedSummary(issueTitle).trim();
   const summary = summaryCandidate || summarizeRequirement(requirementText || issueTitle, 30);
-  const computedBranchName =
-    params.branchName ??
-    buildBranchName({
-      workType,
-      englishSlug: params.englishSlug,
-      requirementText: requirementText || issueTitle,
-    });
-
-  const branch = await gitlab.createBranch(
-    params.codeProjectId,
-    computedBranchName,
-    params.preparation.baseBranch,
-  );
-
-  validateCommitActions(params.toolName, params.commitActions);
   const commitMessage =
     params.commitMessage?.trim() ||
     `${workType}: ${summary}\n\nRelated Issue: ${params.issueProjectId}#${params.issueIid}`;
-  const commit = await gitlab.createCommit({
-    projectId: params.codeProjectId,
-    branch: computedBranchName,
-    commitMessage,
-    actions: params.commitActions,
-  });
+  const computedBranchName =
+    params.deliveryMethod === "local_git"
+      ? params.preparation.workingBranch ?? params.branchName
+      : params.branchName ??
+        buildBranchName({
+          workType,
+          englishSlug: params.englishSlug,
+          requirementText: requirementText || issueTitle,
+        });
+  if (!computedBranchName) {
+    missingParam(params.toolName, "branch_name");
+  }
+  if (
+    params.deliveryMethod === "local_git" &&
+    params.branchName?.trim() &&
+    params.preparation.workingBranch &&
+    params.branchName.trim() !== params.preparation.workingBranch
+  ) {
+    throw new ToolInputError(
+      `[${params.toolName}] branch_name='${params.branchName.trim()}' does not match preparation working_branch='${params.preparation.workingBranch}'. Re-run workflow_prepare_delivery_workspace or stop overriding branch_name.`,
+    );
+  }
+
+  let branch: { name: string; web_url?: string } = { name: computedBranchName };
+  let commit:
+    | {
+        id?: unknown;
+        short_id?: unknown;
+        title?: unknown;
+        web_url?: unknown;
+      }
+    | undefined;
+  let changedFiles: string[] = [];
+
+  if (params.deliveryMethod === "local_git") {
+    const localCommit = await commitAndPushLocalBranch({
+      toolName: params.toolName,
+      repoPath: params.preparation.repoPath,
+      remoteName: params.preparation.remoteName,
+      workingBranch: computedBranchName,
+      commitMessage,
+    });
+    branch = { name: localCommit.branch_name };
+    commit = {
+      id: localCommit.commit_sha,
+      short_id: localCommit.short_sha,
+      title: localCommit.title,
+    };
+    changedFiles = localCommit.changed_files;
+  } else {
+    if (!params.commitActions) {
+      missingParam(params.toolName, "commit_actions");
+    }
+    validateCommitActions(params.toolName, params.commitActions);
+    const createdBranch = await gitlab.createBranch(
+      params.codeProjectId,
+      computedBranchName,
+      params.preparation.baseBranch,
+    );
+    branch = {
+      name: createdBranch.name,
+      web_url: createdBranch.web_url,
+    };
+    const createdCommit = await gitlab.createCommit({
+      projectId: params.codeProjectId,
+      branch: computedBranchName,
+      commitMessage,
+      actions: params.commitActions,
+    });
+    commit = {
+      id: createdCommit?.id,
+      short_id: createdCommit?.short_id,
+      title: createdCommit?.title,
+      web_url: createdCommit?.web_url,
+    };
+    changedFiles = [
+      ...new Set(
+        params.commitActions
+          .map((action) => action.file_path?.trim())
+          .filter((path): path is string => Boolean(path)),
+      ),
+    ];
+  }
 
   const mr = await createWorkflowMergeRequest({
     issueProjectId: params.issueProjectId,
@@ -1457,10 +1537,6 @@ async function executeIssueToMrFullWorkflow(params: {
     label: params.label,
     assigneeUsername: params.assigneeUsername,
   });
-
-  const changedFiles: string[] = [...new Set(params.commitActions
-    .map((action) => action.file_path?.trim())
-    .filter((path): path is string => Boolean(path)))];
 
   const issueCommentBody =
     params.issueCommentBody?.trim() ||
@@ -1487,7 +1563,16 @@ async function executeIssueToMrFullWorkflow(params: {
         head_sha: string;
       }
     | undefined;
-  if (params.checkoutLocalBranch) {
+  if (params.deliveryMethod === "local_git") {
+    localCheckout = {
+      repo_path: params.preparation.repoPath,
+      remote_name: params.preparation.remoteName,
+      branch_name: computedBranchName,
+      commands: [],
+      current_branch: await getCurrentBranchName(params.toolName, params.preparation.repoPath),
+      head_sha: await getHeadSha(params.toolName, params.preparation.repoPath),
+    };
+  } else if (params.checkoutLocalBranch) {
     localCheckout = await syncAndCheckoutLocalBranch({
       toolName: params.toolName,
       repoPath: params.preparation.repoPath,
@@ -1520,7 +1605,7 @@ async function executeIssueToMrFullWorkflow(params: {
       summary: params.changeSummary,
       status: logStatus,
     });
-    const path = await appendMarkdown(params.preparation.repoPath, logPath, markdown);
+    const path = await appendIssueLogMarkdown(params.preparation.repoPath, logPath, markdown);
     await updateIssueLogWithMr({
       repoPath: params.preparation.repoPath,
       logPath,
@@ -1799,7 +1884,7 @@ server.registerTool(
       status: args.status,
     });
 
-    const path = await appendMarkdown(repoPath, logPath, markdown);
+    const path = await appendIssueLogMarkdown(repoPath, logPath, markdown);
     return { updated: true, path };
   }),
 );
@@ -1984,10 +2069,13 @@ server.registerTool(
   "workflow_prepare_delivery_workspace",
   {
     description:
-      "Use before generating commit_actions for delivery workflows. Pass the explicit local repo_path for the target project. This tool verifies a clean local repo, switches to the latest base branch, pulls the newest code, and returns a preparation_key that workflow_issue_to_delivery/workflow_requirement_to_delivery must provide.",
+      "Use before delivery workflows. Pass the explicit local repo_path for the target project. This tool verifies a clean local repo, refreshes the latest base branch, and returns a preparation_key that workflow_issue_to_delivery/workflow_requirement_to_delivery must provide. When delivery_method=local_git, it also creates and checks out the local working branch where code changes should be made.",
     outputSchema: workflowPrepareDeliveryWorkspaceOutputSchema,
     inputSchema: {
       repo_path: z.string().min(1).describe("Local repository path."),
+      delivery_method: deliveryMethodSchema
+        .optional()
+        .describe(envBackedDescription("Delivery implementation mode.", "WORKFLOW_DELIVERY_METHOD")),
       remote_name: z
         .string()
         .optional()
@@ -1996,6 +2084,19 @@ server.registerTool(
         .string()
         .optional()
         .describe(envBackedDescription("Base branch to refresh before code generation.", "WORKFLOW_BASE_BRANCH")),
+      branch_name: z
+        .string()
+        .optional()
+        .describe("Optional branch name override. Required for local_git when no summary/requirement_text is provided."),
+      english_slug: z.string().optional().describe("Optional English slug used when generating a local working branch."),
+      work_type: workTypeSchema
+        .optional()
+        .describe("Optional git/conventional work type override when generating a local working branch."),
+      summary: z.string().optional().describe("Optional summary used to help generate a local working branch."),
+      requirement_text: z
+        .string()
+        .optional()
+        .describe("Optional requirement text used to help generate a local working branch."),
     },
   },
   withToolErrorHandling("workflow_prepare_delivery_workspace", async (args) => {
@@ -2019,12 +2120,26 @@ server.registerTool(
       config.defaults.baseBranch,
       "WORKFLOW_BASE_BRANCH",
     );
+    const deliveryMethod = normalizeDeliveryMethod(
+      optionalStringParam(args.delivery_method, config.defaults.deliveryMethod) ?? "local_git",
+    );
+    const workingBranch = resolvePrepareWorkingBranch({
+      toolName: "workflow_prepare_delivery_workspace",
+      deliveryMethod,
+      branchName: args.branch_name,
+      englishSlug: args.english_slug,
+      workType: args.work_type,
+      summary: args.summary,
+      requirementText: args.requirement_text,
+    });
 
     return prepareDeliveryWorkspace({
       toolName: "workflow_prepare_delivery_workspace",
       repoPath,
       remoteName,
       baseBranch,
+      deliveryMethod,
+      workingBranch,
     });
   }),
 );
@@ -2086,6 +2201,9 @@ server.registerTool(
         .describe(
           "Required key returned by workflow_prepare_delivery_workspace. Delivery is rejected if the prepared base branch is no longer current.",
         ),
+      delivery_method: deliveryMethodSchema
+        .optional()
+        .describe(envBackedDescription("Delivery implementation mode.", "WORKFLOW_DELIVERY_METHOD")),
       issue_project_id: z
         .number()
         .int()
@@ -2124,7 +2242,10 @@ server.registerTool(
         .describe("Optional git/conventional work type override like feat, fix, docs, refactor, hotfix, feature."),
       summary: z.string().optional().describe("Optional summary used for branch/commit/MR title."),
       commit_message: z.string().optional().describe("Optional commit message."),
-      commit_actions: z.array(commitActionSchema).optional().describe("Commit actions list."),
+      commit_actions: z
+        .array(commitActionSchema)
+        .optional()
+        .describe("Commit actions list. Required when delivery_method=remote_api."),
       change_summary: z.string().min(1).describe("Change summary used in MR description and issue log."),
       test_plan: z.string().min(1).describe("Test/acceptance plan used in MR description."),
       label: z
@@ -2193,6 +2314,15 @@ server.registerTool(
       toolName: "workflow_issue_to_delivery",
       preparationKey: args.preparation_key,
     });
+    const deliveryMethod = normalizeDeliveryMethod(
+      optionalStringParam(args.delivery_method, config.defaults.deliveryMethod) ??
+        preparation.deliveryMethod,
+    );
+    if (deliveryMethod !== preparation.deliveryMethod) {
+      throw new ToolInputError(
+        `[workflow_issue_to_delivery] delivery_method='${deliveryMethod}' does not match preparation_key delivery_method='${preparation.deliveryMethod}'. Re-run workflow_prepare_delivery_workspace.`,
+      );
+    }
 
     if (args.issue_images_reviewed !== true) {
       const hasIssueImages = await issueContainsImageReferences(issueProjectId, args.issue_iid);
@@ -2211,22 +2341,26 @@ server.registerTool(
       "WORKFLOW_TARGET_BRANCH",
     );
 
-    if (!args.commit_actions) {
+    let commitActions: CommitActionInput[] | undefined;
+    if (deliveryMethod === "remote_api" && !args.commit_actions) {
       missingParam("workflow_issue_to_delivery", "commit_actions");
     }
-    const commitActions: CommitActionInput[] = args.commit_actions.map((action) => ({
-      action: action.action,
-      file_path: action.file_path?.trim(),
-      previous_path: action.previous_path?.trim(),
-      content: action.content,
-      encoding: action.encoding,
-      execute_filemode: action.execute_filemode,
-      last_commit_id: action.last_commit_id?.trim(),
-    }));
+    if (args.commit_actions) {
+      commitActions = args.commit_actions.map((action) => ({
+        action: action.action,
+        file_path: action.file_path?.trim(),
+        previous_path: action.previous_path?.trim(),
+        content: action.content,
+        encoding: action.encoding,
+        execute_filemode: action.execute_filemode,
+        last_commit_id: action.last_commit_id?.trim(),
+      }));
+    }
 
     const delivery = await executeIssueToMrFullWorkflow({
       toolName: "workflow_issue_to_delivery",
       preparation,
+      deliveryMethod,
       issueProjectId,
       issueProjectPath: optionalStringParam(args.issue_project_path, config.defaults.issueProjectPath),
       issueIid: args.issue_iid,
@@ -2275,6 +2409,9 @@ server.registerTool(
         .describe(
           "Required key returned by workflow_prepare_delivery_workspace. Delivery is rejected if the prepared base branch is no longer current.",
         ),
+      delivery_method: deliveryMethodSchema
+        .optional()
+        .describe(envBackedDescription("Delivery implementation mode.", "WORKFLOW_DELIVERY_METHOD")),
       source_text: z
         .string()
         .optional()
@@ -2338,7 +2475,10 @@ server.registerTool(
         .describe(envBackedDescription("MR target branch.", "WORKFLOW_TARGET_BRANCH")),
       branch_name: z.string().optional().describe("Optional branch name override."),
       commit_message: z.string().optional().describe("Optional commit message."),
-      commit_actions: z.array(commitActionSchema).optional().describe("Commit actions list."),
+      commit_actions: z
+        .array(commitActionSchema)
+        .optional()
+        .describe("Commit actions list. Required when delivery_method=remote_api."),
       change_summary: z.string().min(1).describe("Change summary used in MR/log."),
       test_plan: z.string().min(1).describe("Test/acceptance plan used in MR description and issue comment."),
       checkout_local_branch: z
@@ -2396,6 +2536,15 @@ server.registerTool(
       toolName: "workflow_requirement_to_delivery",
       preparationKey: args.preparation_key,
     });
+    const deliveryMethod = normalizeDeliveryMethod(
+      optionalStringParam(args.delivery_method, config.defaults.deliveryMethod) ??
+        preparation.deliveryMethod,
+    );
+    if (deliveryMethod !== preparation.deliveryMethod) {
+      throw new ToolInputError(
+        `[workflow_requirement_to_delivery] delivery_method='${deliveryMethod}' does not match preparation_key delivery_method='${preparation.deliveryMethod}'. Re-run workflow_prepare_delivery_workspace.`,
+      );
+    }
 
     const issueProjectPath = optionalStringParam(args.issue_project_path, config.defaults.issueProjectPath);
     const codeProjectPath = optionalStringParam(args.code_project_path, config.defaults.codeProjectPath);
@@ -2429,22 +2578,26 @@ server.registerTool(
       "WORKFLOW_TARGET_BRANCH",
     );
 
-    if (!args.commit_actions) {
+    let commitActions: CommitActionInput[] | undefined;
+    if (deliveryMethod === "remote_api" && !args.commit_actions) {
       missingParam("workflow_requirement_to_delivery", "commit_actions");
     }
-    const commitActions: CommitActionInput[] = args.commit_actions.map((action) => ({
-      action: action.action,
-      file_path: action.file_path?.trim(),
-      previous_path: action.previous_path?.trim(),
-      content: action.content,
-      encoding: action.encoding,
-      execute_filemode: action.execute_filemode,
-      last_commit_id: action.last_commit_id?.trim(),
-    }));
+    if (args.commit_actions) {
+      commitActions = args.commit_actions.map((action) => ({
+        action: action.action,
+        file_path: action.file_path?.trim(),
+        previous_path: action.previous_path?.trim(),
+        content: action.content,
+        encoding: action.encoding,
+        execute_filemode: action.execute_filemode,
+        last_commit_id: action.last_commit_id?.trim(),
+      }));
+    }
 
     const delivery = await executeIssueToMrFullWorkflow({
       toolName: "workflow_requirement_to_delivery",
       preparation,
+      deliveryMethod,
       issueProjectId,
       issueProjectPath,
       issueIid: created.issue.iid,

@@ -107,7 +107,9 @@ const workflowLocalSyncCheckoutBranchDataSchema = z.object({
 const workflowPrepareDeliveryWorkspaceDataSchema = z.object({
   repo_path: z.string().describe("Absolute local repository path."),
   remote_name: z.string().describe("Git remote name used for synchronization."),
+  delivery_method: z.enum(["local_git", "remote_api"]).describe("Delivery method prepared for subsequent workflows."),
   base_branch: z.string().describe("Base branch refreshed before code generation."),
+  working_branch: z.string().optional().describe("Prepared local working branch when delivery_method=local_git."),
   current_branch: z.string().describe("Current local branch after preparation."),
   base_head_sha: z.string().describe("Prepared local/remote HEAD SHA for the base branch."),
   commands: z.array(z.string()).describe("Executed git commands."),

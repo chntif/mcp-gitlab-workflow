@@ -1,40 +1,235 @@
 # mcp-gitlab-workflow
 
-`mcp-gitlab-workflow` 是一个面向 GitLab 的 MCP 服务，目标是让 AI Agent 通过工具调用完成完整研发流程：需求解析、Issue、分支、提交、MR、Issue 回填。基于你的一个需求或现有Issue自动完成规范化的功能开发，实现面向Issue开发。
+`mcp-gitlab-workflow` 是一个面向 GitLab 的 MCP 服务，用来把需求、Issue、分支、提交、Merge Request、Issue 回填和本地仓库同步串成一套可调用的工作流。
 
-## 1. 核心能力
+它分成两类工具：
 
-- `workflow_*`：工作流编排工具，适合“直接完成任务链路”
-- `gitlab_*`：原子 API 工具，适合“自定义编排与精细控制”
+- `workflow_*`：偏业务流程编排，适合让 LLM 直接完成需求到交付的链路
+- `gitlab_*`：偏 GitLab 原子能力，适合需要更细粒度控制的场景
 
-## 2. Workflow 工具
+## 功能概览
 
-- `workflow_requirement_to_issue`：分析需求并创建 Issue（支持标签自动建议/自动创建、默认指派给当前用户）
-- `workflow_review_mr_post_comment`：读取 MR 变更并发布审查评论，可选自动审批
-- `workflow_issue_to_delivery`：基于已有 Issue 完成“建分支→提交→MR→Issue 评论→Issue Log”
-- `workflow_requirement_to_delivery`：从需求开始的一体化全链路（先建 Issue，再在同一次调用中继续完成交付）
+当前主要 workflow 工具：
 
-## 3. GitLab 原子工具
+- `workflow_requirement_to_issue`
+- `workflow_prepare_delivery_workspace`
+- `workflow_issue_to_delivery`
+- `workflow_requirement_to_delivery`
+- `workflow_sync_local_branch`
+- `workflow_issue_log_append`
+- `workflow_review_mr_post_comment`
 
-- 与 workflow 工具一样，原子工具里和项目上下文相关的 `project_id` / `issue_project_id` / `code_project_id` 也支持 runtime config fallback。
-- Issue 类工具默认回落到 `WORKFLOW_ISSUE_PROJECT_ID`，代码/MR 类工具默认回落到 `WORKFLOW_CODE_PROJECT_ID`。
-- 对同时适用于任意项目的通用原子工具，如果 issue/code 两个默认项目都已配置且值不同，则仍需要显式传 `project_id`，避免歧义。
+当前主要 GitLab 原子工具：
 
 - 用户与标签：`gitlab_get_current_user`、`gitlab_list_labels`、`gitlab_create_label`、`gitlab_update_label`、`gitlab_delete_label`
-- Issue：`gitlab_create_issue`、`gitlab_get_issue`、`gitlab_get_issue_notes`、`gitlab_add_issue_comment`（支持基于 MR 变更自动生成评论）、`gitlab_get_issue_images`
+- Issue：`gitlab_create_issue`、`gitlab_get_issue`、`gitlab_get_issue_notes`、`gitlab_add_issue_comment`、`gitlab_get_issue_images`
 - 仓库：`gitlab_create_branch`、`gitlab_get_file`、`gitlab_commit_files`、`gitlab_upload_project_file`
 - MR：`gitlab_get_merge_request`、`gitlab_get_mr_notes`、`gitlab_create_merge_request`、`gitlab_create_mr_note`、`gitlab_get_mr_changes`、`gitlab_approve_mr`、`gitlab_unapprove_mr`
 
-## 4. 使用方式
+## 关键约束
 
-### 4.1 本地启动
+### 1. delivery workflow 有硬前置步骤
+
+`workflow_issue_to_delivery` 和 `workflow_requirement_to_delivery` 在执行之前，必须先调用：
+
+- `workflow_prepare_delivery_workspace`
+
+这个 prepare 工具会：
+
+- 校验本地仓库是干净的
+- 切到 `base_branch`
+- 拉取最新代码
+- 当 `delivery_method=local_git` 时，创建并切到本地工作分支
+- 记录一份带时效的 `preparation_key`
+
+随后 delivery workflow 会强校验：
+
+- `preparation_key` 存在且未过期
+- 若 `delivery_method=local_git`，当前仍停留在 prepare 创建的本地工作分支
+- 若 `delivery_method=remote_api`，当前仍停留在 prepare 时的 `base_branch`
+- 远程 `<remote>/<base_branch>` 没继续前进
+
+如果校验失败，delivery 会拒绝执行，并要求重新 prepare。
+
+### 2. `repo_path` 现在显式传入
+
+本地 git 相关工具不再依赖 `process.cwd()` 猜项目目录，也不再使用 `WORKFLOW_LOCAL_REPO_PATH`。
+
+需要本地仓库路径的工具现在都显式传 `repo_path`，例如：
+
+- `workflow_prepare_delivery_workspace`
+- `workflow_sync_local_branch`
+- `workflow_issue_log_append`
+
+### 3. 默认 delivery 模式现在是 `local_git`
+
+新增环境变量：
+
+- `WORKFLOW_DELIVERY_METHOD=local_git|remote_api`
+
+默认值：
+
+- `local_git`
+
+两种模式的区别：
+
+- `local_git`
+  - prepare 阶段创建并切到本地工作分支
+  - LLM 在这个本地分支上改代码
+  - delivery 阶段负责 `git add/commit/push` 和创建 MR
+  - 不要求 `commit_actions`
+- `remote_api`
+  - 保留原有 GitLab API 提交方式
+  - delivery 阶段仍要求 `commit_actions`
+
+### 4. issue log 路径按项目根目录解析
+
+`WORKFLOW_ISSUE_LOG_PATH` 保留，但它只表示项目内的默认日志路径，例如：
+
+- `issue-log.md`
+- `docs/issue-log.md`
+
+当它是相对路径时，会相对显式传入的 `repo_path` 或 prepare 记录里的 `repoPath` 解析。
+
+因此当前默认落点是：
+
+- `<workflow_prepare_delivery_workspace.repo_path>/issue-log.md`
+
+### 5. `work_type` 不再写死为枚举
+
+`work_type` 现在是受约束的普通字符串，而不是固定 `feat/fix/chore` 枚举。只要满足小写 git/conventional 前缀格式即可，例如：
+
+- `feat`
+- `fix`
+- `docs`
+- `refactor`
+- `hotfix`
+- `feature`
+
+当前规则：
+
+- 必须为小写
+- 以字母开头
+- 后续可包含 `a-z`、`0-9`、`.`、`_`、`-`
+
+## 典型调用链路
+
+### 需求只创建 Issue
+
+1. 调 `workflow_requirement_to_issue`
+2. 服务端解析需求、生成标题和分支名建议
+3. 创建 GitLab Issue
+
+### 现有 Issue 交付到 MR
+
+默认 `local_git` 模式：
+
+1. 调 `workflow_prepare_delivery_workspace`
+2. prepare 已切到本地工作分支
+3. 在该分支修改代码
+4. 调 `workflow_issue_to_delivery`
+5. 服务端执行本地 `commit/push`，然后创建 MR、Issue 评论，可选 issue log 更新
+
+显式 `remote_api` 模式：
+
+1. 调 `workflow_prepare_delivery_workspace`
+2. 基于最新 `base_branch` 阅读代码并生成 `commit_actions`
+3. 调 `workflow_issue_to_delivery`
+4. 服务端通过 GitLab API 创建分支、提交、MR、Issue 评论，可选本地 checkout，可选 issue log 更新
+
+### 从需求直接跑完整交付链
+
+默认 `local_git` 模式：
+
+1. 调 `workflow_prepare_delivery_workspace`
+2. prepare 已切到本地工作分支
+3. 在该分支修改代码
+4. 调 `workflow_requirement_to_delivery`
+5. 服务端先创建 Issue，再执行本地 `commit/push`、MR、Issue 评论和 issue log
+
+显式 `remote_api` 模式：
+
+1. 调 `workflow_prepare_delivery_workspace`
+2. 基于最新 `base_branch` 阅读代码并生成 `commit_actions`
+3. 调 `workflow_requirement_to_delivery`
+4. 服务端先创建 Issue，再通过 GitLab API 完成分支、提交、MR、Issue 评论和 issue log
+
+## 模板行为
+
+### 默认 Issue 模板
+
+默认 Issue 模板不再强制 `given / when / then`。当前默认 section 很轻：
+
+- `Summary`
+- `Background`，仅在 `source_text` 与 `requirement_text` 不同时渲染
+- `Expected Change`
+- `Scope`
+
+如果传了 `issue_template`，服务端不再生成默认结构，只做 `{{key}}` 变量替换。
+
+内置可用模板变量包括：
+
+- `{{summary}}`
+- `{{requirement_text}}`
+- `{{source_text}}`
+- `{{expected_change}}`
+- `{{issue_project_id}}`
+- `{{code_project_id}}`
+- `{{issue_project_path}}`
+- `{{code_project_path}}`
+- `{{branch_name}}`
+- `{{work_type}}`
+- `{{label}}`
+
+### 默认 MR 与评论模板
+
+当前默认模板由服务端固定生成：
+
+- MR 描述：`Related issue`、`Change summary`、`Test plan`
+- Issue 完成评论：`Files changed`、`Branch info`、`Implementation notes`、`Validation`
+
+delivery workflow 已移除自动 MR review comment。MR review 仍由独立工具 `workflow_review_mr_post_comment` 负责。
+
+## 配置
+
+### 必填环境变量
+
+- `GITLAB_TOKEN`
+
+### 常用环境变量
+
+- `GITLAB_API_BASE_URL=https://gitlab.com/api/v4`
+- `WORKFLOW_ISSUE_PROJECT_ID`
+- `WORKFLOW_ISSUE_PROJECT_PATH`
+- `WORKFLOW_CODE_PROJECT_ID`
+- `WORKFLOW_CODE_PROJECT_PATH`
+- `WORKFLOW_DELIVERY_METHOD=local_git`
+- `WORKFLOW_BASE_BRANCH=develop`
+- `WORKFLOW_TARGET_BRANCH=develop`
+- `WORKFLOW_LABEL`
+- `WORKFLOW_ASSIGNEE_USERNAME`
+- `WORKFLOW_ISSUE_LOG_PATH=issue-log.md`
+- `WORKFLOW_LOCAL_REMOTE_NAME=origin`
+- `WORKFLOW_CHECKOUT_LOCAL_BRANCH=false`
+- `WORKFLOW_UPDATE_ISSUE_LOG=true`
+
+### 锁定环境变量
+
+如果希望强制固定项目 ID，可使用：
+
+- `WORKFLOW_LOCK_ISSUE_PROJECT_ID`
+- `WORKFLOW_LOCK_CODE_PROJECT_ID`
+
+## 安装与运行
+
+### 方式一：本地构建后运行
 
 ```json
 {
   "mcpServers": {
     "gitlab-workflow": {
       "command": "node",
-      "args": ["/gitlab-workflow-server/dist/src/server.js"],
+      "args": ["/path/to/gitlab-workflow-server/dist/src/server.js"],
       "env": {
         "GITLAB_TOKEN": "YOUR_TOKEN",
         "GITLAB_API_BASE_URL": "https://gitlab.com/api/v4"
@@ -44,7 +239,7 @@
 }
 ```
 
-### 4.2 使用NPX
+### 方式二：通过 npx
 
 ```json
 {
@@ -61,51 +256,24 @@
 }
 ```
 
-### 4.3 关于 `uv/uvx`
+## 运行时原则
 
-本项目是 Node.js 包，推荐 `npx` 方式运行。`uv/uvx` 会在后续上传。
+- 工具参数优先于环境变量
+- 环境变量优先于代码默认值
+- 若仍缺失，返回明确错误，不让 LLM 猜 `project_id`、仓库路径等强环境参数
+- Issue 类原子工具默认回落到 `WORKFLOW_ISSUE_PROJECT_ID`
+- 代码 / MR 类原子工具默认回落到 `WORKFLOW_CODE_PROJECT_ID`
+- 通用原子工具只在 issue/code 项目默认值不冲突时才会自动回落
+- delivery workflow 默认回落到 `WORKFLOW_DELIVERY_METHOD=local_git`
 
-## 5. 环境变量
+## 内部状态文件
 
-说明：
+`workflow_prepare_delivery_workspace` 会在服务端自身目录下维护临时状态文件：
 
-- 环境变量统一走“工具参数 -> 用户 env -> 代码内默认值”的优先级
-- 只有通用且安全的配置项才提供内置默认值；项目 ID、本地仓库路径这类与具体环境强相关的字段默认仍然是未配置状态
-- 对工具中带 env fallback 的字段，建议“未明确指定就省略”，让服务回落到当前配置值；如果当前配置仍未设置，服务会返回缺参错误，不应让模型自行猜测
+- `.mcp-state/delivery-preparations.json`
 
-启动必需有效值：
+这个文件保存尚未消费的 `preparation_key`，用于后续 delivery 校验。它是临时状态缓存，不是历史日志。
 
-- `GITLAB_TOKEN`
-- `GITLAB_API_BASE_URL`
-
-已提供的内置默认值：
-
-- `GITLAB_API_BASE_URL=https://gitlab.com/api/v4`
-- `WORKFLOW_BASE_BRANCH=develop`
-- `WORKFLOW_TARGET_BRANCH=develop`
-- `WORKFLOW_ISSUE_LOG_PATH=issue-log.md`（相对路径时按显式 `repo_path` / delivery 的项目根目录解析）
-- `WORKFLOW_LOCAL_REMOTE_NAME=origin`
-
-默认未配置、需要用户显式传参或设置 env 的配置项：
-
-- `WORKFLOW_ISSUE_PROJECT_ID`
-- `WORKFLOW_ISSUE_PROJECT_PATH`
-- `WORKFLOW_CODE_PROJECT_ID`
-- `WORKFLOW_CODE_PROJECT_PATH`
-其余配置项可以通过 env 覆盖内置默认值：
-
-- `WORKFLOW_BASE_BRANCH`
-- `WORKFLOW_TARGET_BRANCH`
-- `WORKFLOW_LABEL`
-- `WORKFLOW_ASSIGNEE_USERNAME`
-- `WORKFLOW_ISSUE_LOG_PATH`
-- `WORKFLOW_LOCAL_REMOTE_NAME`
-
-可选强约束（锁项目）：
-
-- `WORKFLOW_LOCK_ISSUE_PROJECT_ID`
-- `WORKFLOW_LOCK_CODE_PROJECT_ID`
-
-## 6. License
+## License
 
 MIT

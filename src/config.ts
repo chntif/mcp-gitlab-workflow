@@ -1,8 +1,11 @@
+import { normalizeDeliveryMethod, type DeliveryMethod } from "./delivery-mode.js";
+
 export interface WorkflowEnvDefaults {
   issueProjectId?: number;
   issueProjectPath?: string;
   codeProjectId?: number;
   codeProjectPath?: string;
+  deliveryMethod?: DeliveryMethod;
   baseBranch?: string;
   targetBranch?: string;
   label?: string;
@@ -33,6 +36,7 @@ export const DEFAULT_RUNTIME_CONFIG: RuntimeConfig = {
     issueProjectPath: undefined,
     codeProjectId: undefined,
     codeProjectPath: undefined,
+    deliveryMethod: "local_git",
     baseBranch: "develop",
     targetBranch: "develop",
     label: undefined,
@@ -78,6 +82,10 @@ export function getRuntimeConfig(): RuntimeConfig {
       codeProjectPath: stringEnv(
         "WORKFLOW_CODE_PROJECT_PATH",
         DEFAULT_RUNTIME_CONFIG.defaults.codeProjectPath,
+      ),
+      deliveryMethod: deliveryMethodEnv(
+        "WORKFLOW_DELIVERY_METHOD",
+        DEFAULT_RUNTIME_CONFIG.defaults.deliveryMethod,
       ),
       baseBranch: stringEnv("WORKFLOW_BASE_BRANCH", DEFAULT_RUNTIME_CONFIG.defaults.baseBranch),
       targetBranch: stringEnv("WORKFLOW_TARGET_BRANCH", DEFAULT_RUNTIME_CONFIG.defaults.targetBranch),
@@ -138,6 +146,14 @@ function booleanEnv(envName: string, fallback?: boolean): boolean | undefined {
   }
 
   throw new Error(`Invalid env ${envName}: must be a boolean like true/false`);
+}
+
+function deliveryMethodEnv(envName: string, fallback?: DeliveryMethod): DeliveryMethod | undefined {
+  const raw = optionalString(process.env[envName]);
+  if (!raw) {
+    return fallback;
+  }
+  return normalizeDeliveryMethod(raw);
 }
 
 function parseOptionalInt(raw: string | undefined, envName: string, fallback?: number): number | undefined {
