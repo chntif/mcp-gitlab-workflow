@@ -29,7 +29,7 @@ export interface RuntimeConfig {
 }
 
 export const DEFAULT_RUNTIME_CONFIG: RuntimeConfig = {
-  gitlabApiBaseUrl: "https://gitlab.com/api/v4",
+  gitlabApiBaseUrl: "",
   gitlabToken: "",
   defaults: {
     issueProjectId: undefined,

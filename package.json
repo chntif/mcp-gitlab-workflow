@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": false,
   "type": "module",
-  "description": "GitLab workflow MCP server for issue/branch/commit/MR/review automation",
+  "description": "MCP server for automating GitLab development workflows, turning requirements or assigned issues into merge requests through requirement analysis, issue creation, branching, coding, MR creation, and issue updates. Built for issue-driven development",
   "main": "dist/src/server.js",
   "bin": {
     "mcp-gitlab-workflow": "dist/src/server.js"
