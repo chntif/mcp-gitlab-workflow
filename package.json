@@ -1,6 +1,6 @@
 {
   "name": "@chntif/mcp-gitlab-workflow",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": false,
   "type": "module",
   "description": "GitLab MCP: supports creating issues from requirements or modifying code and submitting merge requests from existing issues, while also providing a set of atomic GitLab API tools for issue-driven development.",
@@ -41,7 +41,7 @@
     "dev": "tsx src/server.ts",
     "start": "node dist/src/server.js",
     "lib": "rimraf dist && npm run build",
-    "pub": "npm run lib && npm publish --access public --registry https://registry.npmjs.org/ --cache .npm-cache",
+    "pub": "npm run lib && npm publish --access public --registry https://registry.npmjs.org/",
     "test": "node -e \"console.log('No automated tests configured')\""
   },
   "engines": {
