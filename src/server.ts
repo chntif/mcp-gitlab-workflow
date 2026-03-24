@@ -1599,6 +1599,8 @@ async function executeIssueToMrFullWorkflow(params: {
       issueProjectPath: params.issueProjectPath,
       issueProjectId: params.issueProjectId,
       issueWebUrl: typeof issue.web_url === "string" ? issue.web_url : "",
+      mrIid: mr.iid,
+      mrUrl: typeof mr.web_url === "string" ? mr.web_url : "",
       branchName: computedBranchName,
       codeProjectPath: params.codeProjectPath,
       codeProjectId: params.codeProjectId,

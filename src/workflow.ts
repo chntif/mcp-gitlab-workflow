@@ -21,6 +21,8 @@ export interface IssueLogEntryInput {
   issueProjectPath?: string;
   issueProjectId: number;
   issueWebUrl: string;
+  mrIid?: number;
+  mrUrl?: string;
   branchName: string;
   codeProjectPath?: string;
   codeProjectId: number;
@@ -161,6 +163,12 @@ export function renderIssueLogEntry(input: IssueLogEntryInput): string {
   const codeProjectLine = input.codeProjectPath
     ? `${input.codeProjectPath} (project_id: ${input.codeProjectId})`
     : `project_id: ${input.codeProjectId}`;
+  const mrRows =
+    input.mrIid !== undefined || input.mrUrl?.trim()
+      ? `| MR ID | ${input.mrIid !== undefined ? `\`${input.mrIid}\`` : "N/A"} |\n| MR URL | ${
+          input.mrUrl?.trim() ? `\`${input.mrUrl.trim()}\`` : "N/A"
+        } |\n`
+      : "";
 
   return `## [${input.date}] ${input.issueTitle}
 
@@ -169,7 +177,7 @@ export function renderIssueLogEntry(input: IssueLogEntryInput): string {
 | Issue ID (iid) | \`${input.issueIid}\` |
 | Issue Project | ${issueProjectLine} |
 | Issue URL | \`${input.issueWebUrl}\` |
-| Code Branch | \`${input.branchName}\` |
+${mrRows}| Code Branch | \`${input.branchName}\` |
 | Code Project | ${codeProjectLine} |
 | Status | ${input.status} |
 
