@@ -142,7 +142,7 @@ claude mcp add gitlab-workflow \
   -- npx -y @chntif/mcp-gitlab-workflow
 ```
 
-You can also add the same config directly in the Claude Code config file.
+You can also directly write the configuration in 3.1 into Claude Code's configuration file.
 
 ### 3.4 Local startup
 
@@ -180,25 +180,25 @@ Parameter resolution order:
 
 If the user does not explicitly pass a parameter such as `project_id`, the tool can use runtime configuration from environment variables. Some variables also have built-in defaults.
 
-| Environment Variable | Purpose | Default | Required |
-| --- | --- | --- | --- |
-| `GITLAB_TOKEN` | GitLab API access token used by the server and all GitLab operations | None | Yes |
-| `GITLAB_API_BASE_URL` | Base URL for the GitLab API | `https://gitlab.com/api/v4` | No |
-| `WORKFLOW_ISSUE_PROJECT_ID` | Default target project ID for issue-related tools | None | No |
-| `WORKFLOW_ISSUE_PROJECT_PATH` | Default issue project path used in templates and references | None | No |
-| `WORKFLOW_CODE_PROJECT_ID` | Default target project ID for repository, branch, commit, and MR tools | None | No |
-| `WORKFLOW_CODE_PROJECT_PATH` | Default code project path used in templates, logs, and output | None | No |
-| `WORKFLOW_BASE_BRANCH` | Default base branch used before creating a new delivery branch | `develop` | No |
-| `WORKFLOW_TARGET_BRANCH` | Default merge request target branch | `develop` | No |
-| `WORKFLOW_LOCAL_REMOTE_NAME` | Default git remote used by local git workflows | `origin` | No |
-| `WORKFLOW_LABEL` | Default issue title prefix and fallback label | None | No |
-| `WORKFLOW_ASSIGNEE_USERNAME` | Default assignee username for issues and merge requests | None | No |
-| `WORKFLOW_ISSUE_LOG_PATH` | Path of the local issue log file | `issue-log.md` | No |
-| `WORKFLOW_UPDATE_ISSUE_LOG` | Whether delivery workflows update the local issue log by default | `true` | No |
-| `WORKFLOW_DELIVERY_METHOD` | Default delivery mode, supports `local_git` and `remote_api` | `local_git` | No |
-| `WORKFLOW_CHECKOUT_LOCAL_BRANCH` | Whether `remote_api` delivery should sync and checkout the created branch locally | `false` | No |
-| `WORKFLOW_LOCK_ISSUE_PROJECT_ID` | Restrict issue operations to a fixed issue project ID | None | No |
-| `WORKFLOW_LOCK_CODE_PROJECT_ID` | Restrict code and MR operations to a fixed code project ID | None | No |
+| Environment Variable             | Purpose                                                                           | Default                     | Required |
+| -------------------------------- | --------------------------------------------------------------------------------- | --------------------------- | -------- |
+| `GITLAB_TOKEN`                   | GitLab API access token used by the server and all GitLab operations              | None                        | Yes      |
+| `GITLAB_API_BASE_URL`            | Base URL for the GitLab API                                                       | `https://gitlab.com/api/v4` | No       |
+| `WORKFLOW_ISSUE_PROJECT_ID`      | Default target project ID for issue-related tools                                 | None                        | No       |
+| `WORKFLOW_ISSUE_PROJECT_PATH`    | Default issue project path used in templates and references                       | None                        | No       |
+| `WORKFLOW_CODE_PROJECT_ID`       | Default target project ID for repository, branch, commit, and MR tools            | None                        | No       |
+| `WORKFLOW_CODE_PROJECT_PATH`     | Default code project path used in templates, logs, and output                     | None                        | No       |
+| `WORKFLOW_BASE_BRANCH`           | Default base branch used before creating a new delivery branch                    | `develop`                   | No       |
+| `WORKFLOW_TARGET_BRANCH`         | Default merge request target branch                                               | `develop`                   | No       |
+| `WORKFLOW_LOCAL_REMOTE_NAME`     | Default git remote used by local git workflows                                    | `origin`                    | No       |
+| `WORKFLOW_LABEL`                 | Default issue title prefix and fallback label                                     | None                        | No       |
+| `WORKFLOW_ASSIGNEE_USERNAME`     | Default assignee username for issues and merge requests                           | None                        | No       |
+| `WORKFLOW_ISSUE_LOG_PATH`        | Path of the local issue log file                                                  | `issue-log.md`              | No       |
+| `WORKFLOW_UPDATE_ISSUE_LOG`      | Whether delivery workflows update the local issue log by default                  | `true`                      | No       |
+| `WORKFLOW_DELIVERY_METHOD`       | Default delivery mode, supports `local_git` and `remote_api`                      | `local_git`                 | No       |
+| `WORKFLOW_CHECKOUT_LOCAL_BRANCH` | Whether `remote_api` delivery should sync and checkout the created branch locally | `false`                     | No       |
+| `WORKFLOW_LOCK_ISSUE_PROJECT_ID` | Restrict issue operations to a fixed issue project ID                             | None                        | No       |
+| `WORKFLOW_LOCK_CODE_PROJECT_ID`  | Restrict code and MR operations to a fixed code project ID                        | None                        | No       |
 
 ### Recommended configuration
 
@@ -210,13 +210,6 @@ If the user does not explicitly pass a parameter such as `project_id`, the tool 
 
 If a specific operation should target values different from your default environment configuration, passing explicit tool arguments will override the configured values.
 
-## 5. Docs
-
-- [Tool Reference](./docs/01-tool-reference.md)
-- [Environment Variables](./docs/02-environment-variables.md)
-- [Workflow Concepts](./docs/03-workflow-concepts.md)
-- [Atomic Tools](./docs/04-atomic-tools.md)
-
-## 6. License
+## 5. License
 
 MIT

@@ -142,7 +142,7 @@ claude mcp add gitlab-workflow \
   -- npx -y @chntif/mcp-gitlab-workflow
 ```
 
-也可以直接将相同配置写入 Claude Code 的配置文件。
+也可以直接将3.1中配置写入 Claude Code 的配置文件。
 
 ### 3.4 本地启动
 
@@ -180,25 +180,25 @@ claude mcp add gitlab-workflow \
 
 如果用户没有显式传入 `project_id` 等参数，tool 会回落到运行时环境变量配置；部分变量同时带有代码内默认值。
 
-| 环境变量 | 作用 | 默认值 | 必需 |
-| --- | --- | --- | --- |
-| `GITLAB_TOKEN` | GitLab API 访问令牌，服务启动和所有 GitLab 操作都依赖它 | 无 | 是 |
-| `GITLAB_API_BASE_URL` | GitLab API 基础地址 | `https://gitlab.com/api/v4` | 否 |
-| `WORKFLOW_ISSUE_PROJECT_ID` | Issue 类工具默认使用的目标项目 ID | 无 | 否 |
-| `WORKFLOW_ISSUE_PROJECT_PATH` | Issue 项目路径，用于模板渲染和引用展示 | 无 | 否 |
-| `WORKFLOW_CODE_PROJECT_ID` | 仓库、分支、提交、MR 类工具默认使用的目标项目 ID | 无 | 否 |
-| `WORKFLOW_CODE_PROJECT_PATH` | 代码项目路径，用于模板、日志和输出展示 | 无 | 否 |
-| `WORKFLOW_BASE_BRANCH` | 创建交付分支前默认同步的基线分支 | `develop` | 否 |
-| `WORKFLOW_TARGET_BRANCH` | MR 默认目标分支 | `develop` | 否 |
-| `WORKFLOW_LOCAL_REMOTE_NAME` | 本地 git workflow 默认 remote 名称 | `origin` | 否 |
-| `WORKFLOW_LABEL` | 默认 Issue 标题前缀与兜底标签 | 无 | 否 |
-| `WORKFLOW_ASSIGNEE_USERNAME` | Issue / MR 默认指派用户名 | 无 | 否 |
-| `WORKFLOW_ISSUE_LOG_PATH` | 本地 issue log 文件路径 | `issue-log.md` | 否 |
-| `WORKFLOW_UPDATE_ISSUE_LOG` | delivery workflow 完成后是否默认更新本地 issue log | `true` | 否 |
-| `WORKFLOW_DELIVERY_METHOD` | delivery workflow 默认执行方式，支持 `local_git` 和 `remote_api` | `local_git` | 否 |
-| `WORKFLOW_CHECKOUT_LOCAL_BRANCH` | `remote_api` 交付后是否自动同步并切换到目标分支 | `false` | 否 |
-| `WORKFLOW_LOCK_ISSUE_PROJECT_ID` | 锁定允许访问的 Issue 项目 ID，防止误操作其他仓库 | 无 | 否 |
-| `WORKFLOW_LOCK_CODE_PROJECT_ID` | 锁定允许访问的代码项目 ID，防止误操作其他仓库 | 无 | 否 |
+| 环境变量                         | 作用                                                             | 默认值                      | 必需 |
+| -------------------------------- | ---------------------------------------------------------------- | --------------------------- | ---- |
+| `GITLAB_TOKEN`                   | GitLab API 访问令牌，服务启动和所有 GitLab 操作都依赖它          | 无                          | 是   |
+| `GITLAB_API_BASE_URL`            | GitLab API 基础地址                                              | `https://gitlab.com/api/v4` | 否   |
+| `WORKFLOW_ISSUE_PROJECT_ID`      | Issue 类工具默认使用的目标项目 ID                                | 无                          | 否   |
+| `WORKFLOW_ISSUE_PROJECT_PATH`    | Issue 项目路径，用于模板渲染和引用展示                           | 无                          | 否   |
+| `WORKFLOW_CODE_PROJECT_ID`       | 仓库、分支、提交、MR 类工具默认使用的目标项目 ID                 | 无                          | 否   |
+| `WORKFLOW_CODE_PROJECT_PATH`     | 代码项目路径，用于模板、日志和输出展示                           | 无                          | 否   |
+| `WORKFLOW_BASE_BRANCH`           | 创建交付分支前默认同步的基线分支                                 | `develop`                   | 否   |
+| `WORKFLOW_TARGET_BRANCH`         | MR 默认目标分支                                                  | `develop`                   | 否   |
+| `WORKFLOW_LOCAL_REMOTE_NAME`     | 本地 git workflow 默认 remote 名称                               | `origin`                    | 否   |
+| `WORKFLOW_LABEL`                 | 默认 Issue 标题前缀与兜底标签                                    | 无                          | 否   |
+| `WORKFLOW_ASSIGNEE_USERNAME`     | Issue / MR 默认指派用户名                                        | 无                          | 否   |
+| `WORKFLOW_ISSUE_LOG_PATH`        | 本地 issue log 文件路径                                          | `issue-log.md`              | 否   |
+| `WORKFLOW_UPDATE_ISSUE_LOG`      | delivery workflow 完成后是否默认更新本地 issue log               | `true`                      | 否   |
+| `WORKFLOW_DELIVERY_METHOD`       | delivery workflow 默认执行方式，支持 `local_git` 和 `remote_api` | `local_git`                 | 否   |
+| `WORKFLOW_CHECKOUT_LOCAL_BRANCH` | `remote_api` 交付后是否自动同步并切换到目标分支                  | `false`                     | 否   |
+| `WORKFLOW_LOCK_ISSUE_PROJECT_ID` | 锁定允许访问的 Issue 项目 ID，防止误操作其他仓库                 | 无                          | 否   |
+| `WORKFLOW_LOCK_CODE_PROJECT_ID`  | 锁定允许访问的代码项目 ID，防止误操作其他仓库                    | 无                          | 否   |
 
 ### 推荐配置
 
@@ -210,13 +210,6 @@ claude mcp add gitlab-workflow \
 
 如果某次操作的目标与默认环境变量不同，显式传入 tool 参数会覆盖环境变量配置。
 
-## 5. 文档
-
-- [工具说明](./docs/01-tool-reference.md)
-- [环境变量](./docs/02-environment-variables.md)
-- [Workflow 概念](./docs/03-workflow-concepts.md)
-- [原子工具](./docs/04-atomic-tools.md)
-
-## 6. License
+## 5. License
 
 MIT
