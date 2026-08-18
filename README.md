@@ -1,3 +1,5 @@
+
+
 # mcp-gitlab-workflow
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
@@ -170,7 +172,7 @@ You can also directly write the configuration in 3.1 into Claude Code's configur
 
 ### 3.5 About `uv/uvx`
 
-This project is a Node.js package. `npx` is the recommended way to run it.
+This project is a Node.js package and requires Node.js `>=20`. `npx` is the recommended way to run it.
 
 ## 4. Environment Variables
 
